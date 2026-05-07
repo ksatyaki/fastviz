@@ -1,0 +1,10 @@
+[package]
+name = "mock_injector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+scene = { path = "../scene" }
+glam = { workspace = true }

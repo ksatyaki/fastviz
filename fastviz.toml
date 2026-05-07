@@ -1,0 +1,38 @@
+# fastviz ROS configuration.
+# Loaded with: cargo run -p app -- --ros --config fastviz.toml
+#
+# The values below mirror RosConfig::default() in crates/ros_node/src/config.rs.
+# Any section you omit falls back to those defaults.
+
+node_name       = "fastviz"
+namespace       = ""
+reference_frame = "map"
+
+# nav_msgs/OccupancyGrid. M0.5 supports a single map topic.
+[map]
+topics = ["/map"]
+
+# geometry_msgs/PoseStamped — one Arrow per topic.
+[poses]
+topics = ["/goal_pose"]
+
+# geometry_msgs/PoseArray — one entity holding many Arrows per topic.
+[pose_arrays]
+topics = ["/particle_cloud"]
+
+# Shared style for both pose kinds above.
+[arrow]
+length       = 0.5
+shaft_radius = 0.025
+head_radius  = 0.06
+color        = [0.95, 0.55, 0.10]
+
+# nav_msgs/Path — one Polyline per topic.
+[paths]
+topics = ["/plan"]
+style  = { width = 2.0, color = [0.20, 0.85, 0.30] }
+
+# sensor_msgs/LaserScan — one Points entity per topic.
+[scans]
+topics = ["/scan"]
+style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
