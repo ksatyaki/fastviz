@@ -17,7 +17,11 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 | E (0.5.5) | Path → Polyline | ✅ done |
 | F (0.5.6) | LaserScan → Points | ✅ done |
 | F.5 (new) | Config file + polled topic discovery + per-topic QoS | ✅ done |
-| G (0.5.7) | URDF + JointState → meshes + FK | ⏳ next |
+| G (new)  | CLI flip: ROS always on, `--mock` opt-in only | ✅ done |
+| H (new)  | PointCloud2 → Points (M3 pulled into M0.5) | ✅ done |
+| H.1 (new) | PC2 received-vs-displayed counter | ✅ done |
+| H.2 (new) | PointPass perf: revision-cached, GPU-side transform, buffer reuse | ✅ done |
+| I (0.5.7) | URDF + JointState → meshes + FK | ⏳ next |
 
 ### Step A notes
 - New crate [crates/ros_node/](crates/ros_node/) with `lib.rs`, `node.rs`, `config.rs`, `ids.rs`.
@@ -25,6 +29,59 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 - `app` gets a `ros` cargo feature (in default), `--ros` / `--no-ros` / `--ref-frame FRAME` CLI flags.
 - `RosNode` owns the executor thread; its `Drop` impl signals shutdown and joins.
 - Smoke test: `cargo run -p app -- --ros --no-mock` → `/fastviz` visible in `ros2 node list` within ~1 s; `kill -INT` shuts down cleanly.
+
+### Step G notes — CLI flip
+
+- `--ros` and `--no-ros` are gone. The ROS2 node always starts (this *is* a ROS2 visualizer); there's no runtime knob to disable it. The `ros` cargo feature is still default-on so the gate exists for hosts without ROS sourced, but no CLI flag toggles it.
+- `--mock` is now opt-in (default = off). `--no-mock` is kept as an explicit override but is the default behavior. The mock injector is layered on top of ROS subscribers when present, so `--mock` is "test the rendering pipeline without a live ROS graph or in addition to one."
+- Help text updated; `[crates/app/src/cli.rs](crates/app/src/cli.rs)` no longer carries an `args.ros` field.
+
+### Step H.2 notes — PointPass perf
+
+Five small wins, layered:
+
+- **Revision-cached prepare** (impact #1+#5): [`SceneGraph`](crates/scene/src/graph.rs) gained a monotonic `revision()` counter that bumps on every mutation (`upsert`, `update_primitive`, `update_transform`, `set_visible`, `remove`). [`PointPass::prepare`](crates/renderer/src/passes/point.rs) caches `last_revision`; if unchanged, the function returns after only refreshing the screen UBO on viewport change. Steady-state redraws against an unchanging scene now skip the per-point repack and the GPU upload entirely.
+- **Per-entity transform via uniform** (impact #2): the per-point CPU `Mat4 * Vec4` is gone. Each visible Points entity gets a slot in a dynamic-offset uniform buffer; the vertex shader applies `entity.transform` before `view_proj`. `point.wgsl` adds `@group(2) @binding(0) var<uniform> entity_transform`. Per-instance position is now in entity-local coords, so the same instance bytes survive across redraws even if the entity moves.
+- **Reused `Vec<PointInstance>`** (impact #4): `instances` is now a `PointPass` field, `clear()`-ed before refill instead of allocated each frame.
+- **`mem::take` in subscribers** (impact #6): [`pointcloud.rs`](crates/ros_node/src/subscribers/pointcloud.rs) and [`laserscan.rs`](crates/ros_node/src/subscribers/laserscan.rs) now move the local `Vec<Point>` into the new `SceneEntity` instead of cloning. The 5 MB memcpy per PC2 message is gone (alloc-per-message remains).
+- **UI visibility goes through `set_visible`**: [`ui.rs`](crates/app/src/ui.rs) now routes the entity-list checkbox through `SceneGraph::set_visible` so the revision bumps. Direct `entity.visible = …` would silently bypass the cache.
+- **Periodic stats log**: [`main.rs`](crates/app/src/main.rs) emits `PC2 throughput @ Ns: received=…, displayed=…, dropped=… (X%)` every 5 s during steady state (in addition to the on-shutdown summary, which only fires on graceful exit).
+
+**Measured impact** (indoor_easy_01 1:1 loop, container-headless, Intel UHD RPL-S iGPU + Vulkan, 161k–171k pts/cloud):
+
+| | Before H.2 | After H.2 |
+|---|---|---|
+| 24 s sample | received=580, dropped=15 (**2.6%**) | (instantaneous) |
+| 150 s sample | — | received=4018, dropped=14 (**0.3%**) |
+
+Drops only appear under occasional renderer stalls (Wayland surface reconfigure, etc.); steady-state drop rate is ~0.3% on integrated graphics. Discrete-GPU runs are expected to drop to 0%.
+
+### Step H.1 notes — PC2 throughput counter
+
+- New module [crates/ros_node/src/stats.rs](crates/ros_node/src/stats.rs): `RosStats { pc2_received: AtomicU64 }`. Owned by `RosNode` as `Arc<RosStats>`, exposed via `RosNode::stats()`.
+- PC2 subscriber bumps `pc2_received` after each successful `scene.upsert`.
+- `App` keeps `pc2_last_seen_received: u64` and `pc2_displayed: u64`. On each `draw()` it loads the atomic; if it has advanced since the last draw, exactly one of the new messages reached the screen — bump `pc2_displayed` by 1, regardless of how many were received in the interval (the rest were overwritten).
+- egui toolbar shows `PC2 D/R  drop X%` so you can watch live drop while a bag plays.
+- On `App::drop` (i.e. window close), a final `log::info!("PC2 throughput: received=…, displayed=…, dropped=… (X%)")` is emitted.
+- **How to run the 1:1 test:**
+  1. `source /opt/ros/jazzy/setup.bash` in two shells.
+  2. Shell A: `cargo run -p app -- --config fastviz.toml`.
+  3. Shell B: `ros2 bag play /workspaces/fastviz/indoor_easy_01` (no `--rate`, no `--loop`).
+  4. Watch the toolbar; quit with Esc when the bag finishes (or playback wraps).
+
+### Step H notes — PointCloud2
+
+- New module [crates/ros_node/src/subscribers/pointcloud.rs](crates/ros_node/src/subscribers/pointcloud.rs).
+- Parses the `fields[]` list once per message to locate `x`, `y`, `z` (FLOAT32 or FLOAT64; mixed types rejected). Walks `data` at `point_step` stride; non-finite values are dropped. Big-endian buffers are rejected with a one-line warn (rare in practice).
+- Endianness: only LE supported. Reads via `f32::from_le_bytes` / `f64::from_le_bytes`.
+- Decimation via `style.stride` (config: `[points] style = { stride = N }`); useful for the indoor_easy_01 bag (~161k pts/cloud × 14 Hz). `stride = 1` is the default.
+- TF lookup folded into `entity.transform = ROS_TO_WORLD * tf_lookup(ref, frame_id)`; per-point math is just three scalar reads — no per-point matrix multiply.
+- QoS = `sensor_data` (best_effort, depth 5). Per-topic overrides via `[points.qos."<topic>"]` using the same `QosOverride` machinery as scans/poses.
+- Entity IDs from `pointcloud_id(idx)` (2400+).
+- Wired into `discovery::bootstrap` + `tick`; bare `"*"` wildcard works just like the other kinds.
+- Unit tests: `locate_xyz_f32_typical`, `locate_xyz_missing_returns_none`, `locate_xyz_mixed_types_rejected`, `read_scalar_le_f32`, `points_section_parses_with_partial_style`. All 16 ros_node tests pass.
+- Smoke test against `indoor_easy_01/`: `ros2 bag play --loop` → app subscribed to `/points2/decompressed`, "first message" log fires with the expected point count and frame.
+- **Intentional non-goals (defer to a later milestone):** intensity- or RGB-packed coloring; `is_dense=false` density-stats reporting; bigendian; struct-of-arrays format support; per-cloud aggregation history.
 
 ### Step F.5 notes (implemented)
 

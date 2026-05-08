@@ -36,12 +36,16 @@ pub struct RosConfig {
     /// Topics carrying `sensor_msgs/LaserScan`. Each gets one Points entity.
     pub scan_topics: Vec<String>,
     pub scan_style: ScanStyle,
+    /// Topics carrying `sensor_msgs/PointCloud2`. Each gets one Points entity.
+    pub point_topics: Vec<String>,
+    pub point_style: PointCloudStyle,
     /// Per-topic QoS overrides (applied on top of each subscriber's default profile).
     pub map_qos: HashMap<String, QosOverride>,
     pub pose_qos: HashMap<String, QosOverride>,
     pub pose_array_qos: HashMap<String, QosOverride>,
     pub path_qos: HashMap<String, QosOverride>,
     pub scan_qos: HashMap<String, QosOverride>,
+    pub point_qos: HashMap<String, QosOverride>,
 }
 
 /// Optional per-topic QoS override. Missing fields fall back to the
@@ -106,6 +110,24 @@ impl Default for ScanStyle {
 }
 
 #[derive(Clone, Debug)]
+pub struct PointCloudStyle {
+    pub size: f32,
+    pub color: scene::Color,
+    /// Decimation: keep 1 of every N points (1 = all). Useful for dense LiDAR clouds.
+    pub stride: usize,
+}
+
+impl Default for PointCloudStyle {
+    fn default() -> Self {
+        PointCloudStyle {
+            size: 2.0,
+            color: scene::Color::rgb(0.30, 0.85, 1.0),
+            stride: 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct PathStyle {
     pub width: f32,
     pub color: scene::Color,
@@ -153,11 +175,14 @@ impl Default for RosConfig {
             path_style: PathStyle::default(),
             scan_topics: vec!["/scan".into()],
             scan_style: ScanStyle::default(),
+            point_topics: Vec::new(),
+            point_style: PointCloudStyle::default(),
             map_qos: HashMap::new(),
             pose_qos: HashMap::new(),
             pose_array_qos: HashMap::new(),
             path_qos: HashMap::new(),
             scan_qos: HashMap::new(),
+            point_qos: HashMap::new(),
         }
     }
 }
@@ -190,6 +215,7 @@ pub struct RawConfig {
     pub arrow: Option<RawArrow>,
     pub paths: Option<RawPaths>,
     pub scans: Option<RawScans>,
+    pub points: Option<RawPoints>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -245,6 +271,22 @@ pub struct RawScanStyle {
     pub color: [f32; 3],
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawPoints {
+    pub topics: Vec<String>,
+    pub style: Option<RawPointStyle>,
+    pub qos: HashMap<String, QosOverride>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawPointStyle {
+    pub size: Option<f32>,
+    pub color: Option<[f32; 3]>,
+    pub stride: Option<usize>,
+}
+
 impl RawConfig {
     /// Converts the parsed TOML into the runtime form. Anything not specified
     /// in the file falls back to `RosConfig::default()`.
@@ -262,6 +304,7 @@ impl RawConfig {
             arrow,
             paths,
             scans,
+            points,
         } = self;
 
         let (map_topic, map_qos) = match map {
@@ -310,6 +353,21 @@ impl RawConfig {
             ),
             None => (d.scan_topics, d.scan_style, d.scan_qos),
         };
+        let (point_topics, point_style, point_qos) = match points {
+            Some(p) => {
+                let dp = d.point_style;
+                let style = p
+                    .style
+                    .map(|s| PointCloudStyle {
+                        size: s.size.unwrap_or(dp.size),
+                        color: s.color.map(rgb_to_color).unwrap_or(dp.color),
+                        stride: s.stride.unwrap_or(dp.stride),
+                    })
+                    .unwrap_or(dp);
+                (p.topics, style, p.qos)
+            }
+            None => (d.point_topics, d.point_style, d.point_qos),
+        };
 
         RosConfig {
             node_name: node_name.unwrap_or(d.node_name),
@@ -323,11 +381,14 @@ impl RawConfig {
             path_style,
             scan_topics,
             scan_style,
+            point_topics,
+            point_style,
             map_qos,
             pose_qos,
             pose_array_qos,
             path_qos,
             scan_qos,
+            point_qos,
         }
     }
 }
@@ -408,6 +469,22 @@ mod tests {
         let bad = "totally_made_up_field = 7\n";
         let r = toml::from_str::<RawConfig>(bad);
         assert!(r.is_err(), "unknown root keys should fail");
+    }
+
+    #[test]
+    fn points_section_parses_with_partial_style() {
+        let toml = r#"
+            [points]
+            topics = ["/points2/decompressed"]
+            style = { stride = 4 }
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        assert_eq!(cfg.point_topics, vec!["/points2/decompressed"]);
+        assert_eq!(cfg.point_style.stride, 4);
+        // Unspecified fields fall back to defaults.
+        let d = RosConfig::default();
+        assert!((cfg.point_style.size - d.point_style.size).abs() < 1e-6);
     }
 
     #[test]

@@ -47,10 +47,20 @@ struct AppContext {
     scene: Arc<RwLock<SceneGraph>>,
     mock: Option<MockInjector>,
     #[cfg(feature = "ros")]
-    #[allow(dead_code)] // kept alive for its Drop impl (signals shutdown + joins thread)
     ros: Option<ros_node::RosNode>,
     input: InputState,
     show_reference_grid: bool,
+    /// PC2 messages we've witnessed in `RosStats` so far. Compared to the
+    /// current value on each draw to count how many distinct frames actually
+    /// reached the screen.
+    pc2_last_seen_received: u64,
+    /// Number of draws where a fresh PC2 frame was on screen (i.e.
+    /// `pc2_received` advanced since the previous draw).
+    pc2_displayed: u64,
+    /// Wall-clock origin for periodic stats logging.
+    pc2_stats_started_at: std::time::Instant,
+    /// Most recent periodic-log emission (every N seconds).
+    pc2_last_log_at: std::time::Instant,
 }
 
 #[derive(Default)]
@@ -64,6 +74,35 @@ struct InputState {
 impl App {
     fn new(args: Args) -> Self {
         App { args, ctx: None }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let Some(ctx) = self.ctx.as_ref() else {
+            return;
+        };
+        #[cfg(feature = "ros")]
+        let received = ctx
+            .ros
+            .as_ref()
+            .map(|n| {
+                n.stats()
+                    .pc2_received
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .unwrap_or(ctx.pc2_last_seen_received);
+        #[cfg(not(feature = "ros"))]
+        let received = ctx.pc2_last_seen_received;
+
+        let displayed = ctx.pc2_displayed;
+        if received > 0 {
+            let dropped = received.saturating_sub(displayed);
+            let pct = 100.0 * (dropped as f64) / (received as f64);
+            log::info!(
+                "PC2 throughput: received={received}, displayed={displayed}, dropped={dropped} ({pct:.1}%)"
+            );
+        }
     }
 }
 
@@ -114,7 +153,7 @@ impl ApplicationHandler for App {
         };
 
         #[cfg(feature = "ros")]
-        let ros = if self.args.ros {
+        let ros = {
             let mut cfg = match self.args.config.as_deref() {
                 Some(p) => match ros_node::RosConfig::from_path(p) {
                     Ok(c) => {
@@ -139,8 +178,6 @@ impl ApplicationHandler for App {
                     None
                 }
             }
-        } else {
-            None
         };
 
         window.request_redraw();
@@ -155,6 +192,10 @@ impl ApplicationHandler for App {
             ros,
             input: InputState::default(),
             show_reference_grid: true,
+            pc2_last_seen_received: 0,
+            pc2_displayed: 0,
+            pc2_stats_started_at: std::time::Instant::now(),
+            pc2_last_log_at: std::time::Instant::now(),
         });
     }
 
@@ -267,6 +308,44 @@ impl AppContext {
 
         let stats = self.renderer.stats;
 
+        // Producer/consumer accounting for PC2 frames. If `pc2_received`
+        // advanced since the last draw, exactly ONE of those messages is on
+        // screen this frame (the others were overwritten before we got here).
+        #[cfg(feature = "ros")]
+        let pc2_received: u64 = self
+            .ros
+            .as_ref()
+            .map(|n| {
+                n.stats()
+                    .pc2_received
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            })
+            .unwrap_or(0);
+        #[cfg(not(feature = "ros"))]
+        let pc2_received: u64 = 0;
+        if pc2_received > self.pc2_last_seen_received {
+            self.pc2_displayed += 1;
+            self.pc2_last_seen_received = pc2_received;
+        }
+        let pc2_stats = ui::Pc2Stats {
+            received: pc2_received,
+            displayed: self.pc2_displayed,
+        };
+
+        // Periodic throughput log (every 5 s) so we get measurements even when
+        // the app is killed without a graceful exit.
+        let now = std::time::Instant::now();
+        if pc2_received > 0 && now.duration_since(self.pc2_last_log_at).as_secs_f32() >= 5.0 {
+            let elapsed = now.duration_since(self.pc2_stats_started_at).as_secs_f32();
+            let dropped = pc2_received.saturating_sub(self.pc2_displayed);
+            let pct = 100.0 * (dropped as f64) / (pc2_received as f64);
+            log::info!(
+                "PC2 throughput @ {elapsed:.1}s: received={pc2_received}, displayed={}, dropped={dropped} ({pct:.1}%)",
+                self.pc2_displayed
+            );
+            self.pc2_last_log_at = now;
+        }
+
         // 1. Run the UI logic (button clicks etc. mutate camera + scene now).
         let full_output = {
             let window = self.window.clone();
@@ -275,7 +354,7 @@ impl AppContext {
             let show_grid = &mut self.show_reference_grid;
             self.egui.run_ui(&window, |egui_ctx| {
                 let mut scene = scene.write();
-                ui::draw(egui_ctx, &mut scene, camera, stats, show_grid);
+                ui::draw(egui_ctx, &mut scene, camera, stats, show_grid, pc2_stats);
             })
         };
 

@@ -64,6 +64,11 @@ impl SceneEntity {
 pub struct SceneGraph {
     pub entities: HashMap<EntityId, SceneEntity>,
     pub reference_frame: String,
+    /// Monotonic counter bumped on every mutation. Render passes cache their
+    /// last-seen value so they can skip rebuild + upload when the scene is
+    /// unchanged (i.e. the renderer is redrawing faster than producers are
+    /// publishing).
+    revision: u64,
 }
 
 impl Default for SceneGraph {
@@ -77,13 +82,20 @@ impl SceneGraph {
         SceneGraph {
             entities: HashMap::new(),
             reference_frame: reference_frame.into(),
+            revision: 0,
         }
+    }
+
+    /// Latest mutation counter — see [`SceneGraph::revision`] doc on the field.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Insert or replace an entity, marking it dirty.
     pub fn upsert(&mut self, mut entity: SceneEntity) {
         entity.dirty = true;
         self.entities.insert(entity.id, entity);
+        self.revision += 1;
     }
 
     /// Update an entity's primitive payload in place. Marks dirty.
@@ -91,24 +103,33 @@ impl SceneGraph {
         if let Some(e) = self.entities.get_mut(&id) {
             e.primitive = primitive;
             e.dirty = true;
+            self.revision += 1;
         }
     }
 
-    /// Update only the transform (cheap — no GPU re-upload required).
+    /// Update the transform. Bumps revision so the renderer picks up the new
+    /// value; the per-entity primitive payload doesn't change so the data
+    /// upload itself is unaffected.
     pub fn update_transform(&mut self, id: EntityId, transform: Mat4) {
         if let Some(e) = self.entities.get_mut(&id) {
             e.transform = transform;
+            self.revision += 1;
         }
     }
 
     pub fn set_visible(&mut self, id: EntityId, visible: bool) {
         if let Some(e) = self.entities.get_mut(&id) {
             e.visible = visible;
+            self.revision += 1;
         }
     }
 
     pub fn remove(&mut self, id: EntityId) -> Option<SceneEntity> {
-        self.entities.remove(&id)
+        let removed = self.entities.remove(&id);
+        if removed.is_some() {
+            self.revision += 1;
+        }
+        removed
     }
 }
 

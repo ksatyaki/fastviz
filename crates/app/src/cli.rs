@@ -2,8 +2,9 @@
 
 #[derive(Clone, Debug)]
 pub struct Args {
+    /// Run the M0 mock injector. Off by default; opt in with `--mock` to test
+    /// the rendering pipeline without a live ROS graph.
     pub mock: bool,
-    pub ros: bool,
     pub ref_frame: String,
     pub config: Option<std::path::PathBuf>,
     pub width: u32,
@@ -13,8 +14,7 @@ pub struct Args {
 impl Default for Args {
     fn default() -> Self {
         Args {
-            mock: cfg!(feature = "mock"),
-            ros: false,
+            mock: false,
             ref_frame: "map".into(),
             config: None,
             width: 1280,
@@ -31,8 +31,6 @@ impl Args {
             match arg.as_str() {
                 "--mock" => args.mock = true,
                 "--no-mock" => args.mock = false,
-                "--ros" => args.ros = true,
-                "--no-ros" => args.ros = false,
                 "--ref-frame" => {
                     if let Some(s) = iter.next() {
                         args.ref_frame = s;
@@ -77,7 +75,10 @@ fn print_help() {
     println!(
         "fastviz — ROS2 visualizer\n\
          \n\
-         Usage:\n  app [--mock] [--ros] [--ref-frame FRAME] [--config PATH] [--width N] [--height N]\n\
+         Usage:\n  app [--mock] [--ref-frame FRAME] [--config PATH] [--width N] [--height N]\n\
+         \n\
+         The ROS2 node always starts (this is a ROS2 visualizer). --mock layers the\n\
+         M0 mock injector on top for testing the rendering pipeline.\n\
          \n\
          Controls:\n\
          \tLeft drag    orbit\n\

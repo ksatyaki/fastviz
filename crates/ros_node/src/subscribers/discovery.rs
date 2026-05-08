@@ -15,7 +15,8 @@ use futures::executor::LocalSpawner;
 use scene::SceneHandle;
 
 use crate::config::RosConfig;
-use crate::subscribers::{laserscan, occupancy, path, pose};
+use crate::stats::RosStats;
+use crate::subscribers::{laserscan, occupancy, path, pointcloud, pose};
 // occupancy::MSG_TYPE exists for symmetry but isn't used because the map
 // subscriber is single-topic (no wildcards in M0.5).
 use crate::tf::TfTree;
@@ -31,10 +32,12 @@ pub struct Registry {
     pose_arrays: HashMap<String, usize>,
     paths: HashMap<String, usize>,
     scans: HashMap<String, usize>,
+    points: HashMap<String, usize>,
     pose_next: usize,
     pose_array_next: usize,
     path_next: usize,
     scan_next: usize,
+    point_next: usize,
 }
 
 impl Registry {
@@ -51,6 +54,7 @@ pub fn bootstrap(
     scene: SceneHandle,
     tf: Arc<TfTree>,
     cfg: &RosConfig,
+    stats: Arc<RosStats>,
 ) -> Result<Registry> {
     let mut reg = Registry::new();
 
@@ -78,6 +82,9 @@ pub fn bootstrap(
     for topic in cfg.scan_topics.iter().filter(|t| t.as_str() != WILDCARD) {
         spawn_scan(node, spawner, &scene, &tf, cfg, &mut reg, topic)?;
     }
+    for topic in cfg.point_topics.iter().filter(|t| t.as_str() != WILDCARD) {
+        spawn_pointcloud(node, spawner, &scene, &tf, cfg, &mut reg, &stats, topic)?;
+    }
 
     if has_wildcard(cfg) {
         log::info!("topic discovery enabled (wildcard \"*\" present in config)");
@@ -94,6 +101,7 @@ pub fn tick(
     tf: &Arc<TfTree>,
     cfg: &RosConfig,
     reg: &mut Registry,
+    stats: &Arc<RosStats>,
 ) -> Result<()> {
     if !has_wildcard(cfg) {
         return Ok(());
@@ -110,6 +118,7 @@ pub fn tick(
     let pose_array_wild = cfg.pose_array_topics.iter().any(|t| t == WILDCARD);
     let path_wild = cfg.path_topics.iter().any(|t| t == WILDCARD);
     let scan_wild = cfg.scan_topics.iter().any(|t| t == WILDCARD);
+    let point_wild = cfg.point_topics.iter().any(|t| t == WILDCARD);
 
     for (topic, types) in &snapshot {
         for ty in types {
@@ -124,6 +133,11 @@ pub fn tick(
                 spawn_path(node, spawner, scene, tf, cfg, reg, topic)?;
             } else if scan_wild && ty == laserscan::MSG_TYPE && !reg.scans.contains_key(topic) {
                 spawn_scan(node, spawner, scene, tf, cfg, reg, topic)?;
+            } else if point_wild
+                && ty == pointcloud::MSG_TYPE
+                && !reg.points.contains_key(topic)
+            {
+                spawn_pointcloud(node, spawner, scene, tf, cfg, reg, stats, topic)?;
             }
         }
     }
@@ -136,6 +150,7 @@ fn has_wildcard(cfg: &RosConfig) -> bool {
         &cfg.pose_array_topics,
         &cfg.path_topics,
         &cfg.scan_topics,
+        &cfg.point_topics,
     ]
     .into_iter()
     .any(|v| v.iter().any(|t| t == WILDCARD))
@@ -254,6 +269,38 @@ fn spawn_scan(
         cfg.scan_qos.get(topic).cloned(),
     )?;
     reg.scans.insert(topic.to_string(), idx);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_pointcloud(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: &SceneHandle,
+    tf: &Arc<TfTree>,
+    cfg: &RosConfig,
+    reg: &mut Registry,
+    stats: &Arc<RosStats>,
+    topic: &str,
+) -> Result<()> {
+    if reg.points.contains_key(topic) {
+        return Ok(());
+    }
+    let idx = reg.point_next;
+    reg.point_next += 1;
+    pointcloud::spawn_topic(
+        node,
+        spawner,
+        scene.clone(),
+        tf.clone(),
+        cfg.reference_frame.clone(),
+        cfg.point_style.clone(),
+        topic.to_string(),
+        idx,
+        cfg.point_qos.get(topic).cloned(),
+        stats.clone(),
+    )?;
+    reg.points.insert(topic.to_string(), idx);
     Ok(())
 }
 

@@ -6,7 +6,10 @@
 
 node_name       = "fastviz"
 namespace       = ""
-reference_frame = "map"
+reference_frame = "depth_camera_link"
+
+[points]
+topics = ["/points2/decompressed"]
 
 # nav_msgs/OccupancyGrid. M0.5 supports a single map topic.
 [map]

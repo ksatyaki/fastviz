@@ -13,6 +13,7 @@ pub const ROS_ID_POSE_BASE: u64 = 2000; // PoseStamped topics
 pub const ROS_ID_POSE_ARRAY_BASE: u64 = 2100; // PoseArray topics
 pub const ROS_ID_PATH_BASE: u64 = 2200; // Path topics
 pub const ROS_ID_SCAN_BASE: u64 = 2300; // LaserScan topics
+pub const ROS_ID_POINTCLOUD_BASE: u64 = 2400; // PointCloud2 topics
 
 pub fn pose_id(topic_index: usize) -> EntityId {
     EntityId(ROS_ID_POSE_BASE + topic_index as u64)
@@ -28,4 +29,8 @@ pub fn path_id(topic_index: usize) -> EntityId {
 
 pub fn scan_id(topic_index: usize) -> EntityId {
     EntityId(ROS_ID_SCAN_BASE + topic_index as u64)
+}
+
+pub fn pointcloud_id(topic_index: usize) -> EntityId {
+    EntityId(ROS_ID_POINTCLOUD_BASE + topic_index as u64)
 }

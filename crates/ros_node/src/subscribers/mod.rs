@@ -4,5 +4,6 @@ pub mod discovery;
 pub mod laserscan;
 pub mod occupancy;
 pub mod path;
+pub mod pointcloud;
 pub mod pose;
 pub mod tf;

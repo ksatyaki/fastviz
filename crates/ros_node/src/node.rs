@@ -11,21 +11,25 @@ use futures::executor::LocalPool;
 use scene::SceneHandle;
 
 use crate::config::RosConfig;
+use crate::stats::RosStats;
 use crate::subscribers;
 use crate::tf::TfTree;
 
 pub struct RosNode {
     handle: Option<thread::JoinHandle<()>>,
     shutdown: Sender<()>,
+    stats: Arc<RosStats>,
 }
 
 impl RosNode {
     pub fn spawn(scene: SceneHandle, cfg: RosConfig) -> Result<Self> {
         let (tx, rx) = bounded::<()>(1);
+        let stats = Arc::new(RosStats::default());
+        let stats_thread = stats.clone();
         let handle = thread::Builder::new()
             .name("ros2-executor".into())
             .spawn(move || {
-                if let Err(e) = run(scene, cfg, rx) {
+                if let Err(e) = run(scene, cfg, rx, stats_thread) {
                     log::error!("ros2 executor exited with error: {e:#}");
                 }
             })
@@ -33,7 +37,13 @@ impl RosNode {
         Ok(RosNode {
             handle: Some(handle),
             shutdown: tx,
+            stats,
         })
+    }
+
+    /// Cross-thread counters (e.g. PC2 messages received). Cheap atomic loads.
+    pub fn stats(&self) -> &Arc<RosStats> {
+        &self.stats
     }
 
     pub fn shutdown(mut self) {
@@ -53,7 +63,12 @@ impl Drop for RosNode {
     }
 }
 
-fn run(scene: SceneHandle, cfg: RosConfig, shutdown: Receiver<()>) -> Result<()> {
+fn run(
+    scene: SceneHandle,
+    cfg: RosConfig,
+    shutdown: Receiver<()>,
+    stats: Arc<RosStats>,
+) -> Result<()> {
     let ctx = r2r::Context::create().context("r2r::Context::create")?;
     let mut node =
         r2r::Node::create(ctx, &cfg.node_name, &cfg.namespace).context("r2r::Node::create")?;
@@ -74,6 +89,7 @@ fn run(scene: SceneHandle, cfg: RosConfig, shutdown: Receiver<()>) -> Result<()>
         scene.clone(),
         tf_tree.clone(),
         &cfg,
+        stats.clone(),
     )
     .context("subscriber bootstrap")?;
 
@@ -94,6 +110,7 @@ fn run(scene: SceneHandle, cfg: RosConfig, shutdown: Receiver<()>) -> Result<()>
                 &tf_tree,
                 &cfg,
                 &mut registry,
+                &stats,
             ) {
                 log::warn!("discovery tick failed: {e:#}");
             }

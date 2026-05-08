@@ -9,8 +9,10 @@ pub mod config;
 pub mod coords;
 pub mod ids;
 pub mod node;
+pub mod stats;
 pub mod subscribers;
 pub mod tf;
 
 pub use config::RosConfig;
 pub use node::RosNode;
+pub use stats::RosStats;

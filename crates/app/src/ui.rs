@@ -4,12 +4,19 @@ use egui::{Align, Layout};
 use renderer::{FrameStats, OrbitCamera};
 use scene::{ScenePrimitive, SceneGraph};
 
+#[derive(Copy, Clone, Default)]
+pub struct Pc2Stats {
+    pub received: u64,
+    pub displayed: u64,
+}
+
 pub fn draw(
     ctx: &egui::Context,
     scene: &mut SceneGraph,
     camera: &mut OrbitCamera,
     stats: FrameStats,
     show_reference_grid: &mut bool,
+    pc2: Pc2Stats,
 ) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -33,6 +40,15 @@ pub fn draw(
                     0.0
                 };
                 ui.label(format!("{fps:6.1} fps  ({:.1} ms)", stats.last_frame_seconds * 1000.0));
+                if pc2.received > 0 {
+                    ui.separator();
+                    let dropped = pc2.received.saturating_sub(pc2.displayed);
+                    let pct = 100.0 * (dropped as f64) / (pc2.received as f64);
+                    ui.label(format!(
+                        "PC2 {}/{}  drop {pct:.1}%",
+                        pc2.displayed, pc2.received
+                    ));
+                }
             });
         });
     });
@@ -50,14 +66,17 @@ pub fn draw(
             ids.sort();
 
             for id in ids {
-                let entity = scene.entities.get_mut(&id).unwrap();
+                let entity = scene.entities.get(&id).unwrap();
                 let display = entity
                     .label
                     .clone()
                     .unwrap_or_else(|| format!("entity #{}", id.0));
                 let kind = primitive_label(&entity.primitive);
+                let mut visible = entity.visible;
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut entity.visible, "");
+                    if ui.checkbox(&mut visible, "").changed() {
+                        scene.set_visible(id, visible);
+                    }
                     ui.label(format!("{display}  ({kind})"));
                 });
             }

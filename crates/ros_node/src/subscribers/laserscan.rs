@@ -96,7 +96,7 @@ pub fn spawn_topic(
                     first = false;
                 }
 
-                let entity = SceneEntity::new(id, ScenePrimitive::Points(points.clone()))
+                let entity = SceneEntity::new(id, ScenePrimitive::Points(std::mem::take(&mut points)))
                     .with_transform(transform)
                     .with_label(topic.clone());
                 scene.write().upsert(entity);
