@@ -6,46 +6,15 @@
 //   sudo systemctl restart docker        # or use podman; see README
 //   xhost +SI:localuser:$(whoami)        # before first run
 //
-// On a non-NVIDIA host: drop "--gpus=all" from runArgs and Mesa llvmpipe will be used.
+// Build/runtime config (image, mounts, GPU, env, network) lives in
+// docker-compose.yml. On a non-NVIDIA host, drop the `deploy:` block from
+// docker-compose.yml and Mesa llvmpipe will be used.
 {
     "name": "fastviz dev (jazzy + vulkan)",
-    "build": {
-        "dockerfile": "Dockerfile",
-        "args": {
-            "USERNAME": "dev",
-            "USER_UID": "1000",
-            "USER_GID": "1000"
-        }
-    },
-
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "fastviz",
     "workspaceFolder": "/workspaces/fastviz",
-    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/fastviz,type=bind",
-
     "remoteUser": "dev",
-
-    // Mount the host's ~/.claude so prior conversations and credentials are
-    // visible to `claude` running inside the container. Drop this mount if
-    // you want a clean session store.
-    "mounts": [
-        "source=${localEnv:HOME}/.claude,target=/home/dev/.claude,type=bind",
-        "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind"
-    ],
-
-    "containerEnv": {
-        "DISPLAY": "${localEnv:DISPLAY}",
-        "QT_X11_NO_MITSHM": "1",
-        "NVIDIA_VISIBLE_DEVICES": "all",
-        "NVIDIA_DRIVER_CAPABILITIES": "graphics,utility,compute",
-        "WGPU_BACKEND": "vulkan",
-        "RUST_LOG": "info"
-    },
-
-    "runArgs": [
-        "--gpus=all",
-        "--ipc=host",
-        "--network=host",
-        "--device=/dev/dri"
-    ],
 
     "customizations": {
         "vscode": {
