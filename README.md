@@ -36,7 +36,7 @@ Inside the dev container (ROS2 Jazzy already sourced):
 
 ```sh
 cargo run -p app -- --ros                            # defaults; subscribes to /map, /scan, /plan, …
-cargo run -p app -- --ros --config fastviz.toml      # explicit config
+cargo run -p app -- --ros --config configs/default.toml  # explicit config
 cargo run -p app -- --ros --no-mock                  # ROS only, no mock injector
 ```
 
@@ -46,8 +46,9 @@ toolchain requirement for hosts without ROS2.
 
 ### Config file
 
-[fastviz.toml](fastviz.toml) at the repo root mirrors `RosConfig::default()`
-and is the source of truth for documentation. Key features:
+[configs/default.toml](configs/default.toml) mirrors `RosConfig::default()`
+and is the source of truth for documentation. Other presets live alongside it
+(e.g. [configs/turtlebot4.toml](configs/turtlebot4.toml)). Key features:
 
 - Each kind (`[map]`, `[poses]`, `[pose_arrays]`, `[paths]`, `[scans]`)
   takes a `topics = [...]` list.
@@ -133,7 +134,7 @@ Inside the container:
 echo $ROS_DISTRO                  # → jazzy
 vulkaninfo --summary | head       # → NVIDIA driver if --gpus=all worked
 cargo run -p app -- --mock        # M0 path still works
-cargo run -p app -- --ros --no-mock --config fastviz.toml
+cargo run -p app -- --ros --no-mock --config configs/default.toml
 ```
 
 If you don't have `nvidia-container-toolkit`, remove `--gpus=all` from

@@ -1,0 +1,26 @@
+# fastviz config for the TurtleBot 4 Gazebo Harmonic simulation.
+# Run with:
+#   cargo run -p app -- --ros --no-mock --config configs/turtlebot4.toml
+#
+# The URDF ships as xacro; expand it once before launching fastviz:
+#   xacro $(ros2 pkg prefix turtlebot4_description)/share/turtlebot4_description/urdf/standard/turtlebot4.urdf.xacro \
+#     > /tmp/turtlebot4.urdf
+#
+# Sim is launched separately, e.g.:
+#   ros2 launch turtlebot4_ignition_bringup turtlebot4_ignition.launch.py
+
+node_name       = "fastviz"
+namespace       = ""
+# The sim publishes odom -> base_link continuously; map is only present once
+# SLAM/Nav2 are running. Use odom so the robot appears immediately.
+reference_frame = "odom"
+
+# sensor_msgs/LaserScan — RPLidar A1 on the TurtleBot 4.
+[scans]
+topics = ["/sensors/lidar3d_0/scan"]
+style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
+
+# sensor_msgs/PointCloud2 — OAK-D stereo cloud.
+[points]
+topics = ["/sensors/lidar3d_0/points"]
+style  = { size = 2.0, color = [0.30, 0.45, 1.0], stride = 2 }

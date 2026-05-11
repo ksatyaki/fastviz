@@ -21,7 +21,11 @@ pub fn spawn(node: &mut r2r::Node, spawner: &LocalSpawner, tree: Arc<TfTree>) ->
         tree.clone(),
         "/tf",
         QosProfile::default().keep_last(100),
+        false,
     )?;
+    // `/tf_static` is low-rate (latched messages, one per publisher) but
+    // load-bearing for every downstream lookup. Log every message at INFO so
+    // misconfigurations show up immediately rather than disappearing into TRACE.
     spawn_one(
         node,
         spawner,
@@ -30,6 +34,7 @@ pub fn spawn(node: &mut r2r::Node, spawner: &LocalSpawner, tree: Arc<TfTree>) ->
         QosProfile::default()
             .keep_last(100)
             .durability(DurabilityPolicy::TransientLocal),
+        true,
     )?;
     Ok(())
 }
@@ -40,6 +45,7 @@ fn spawn_one(
     tree: Arc<TfTree>,
     topic: &str,
     qos: QosProfile,
+    log_every: bool,
 ) -> Result<()> {
     let mut sub = node
         .subscribe::<tf2_msgs::msg::TFMessage>(topic, qos)
@@ -55,7 +61,12 @@ fn spawn_one(
                 let n = msg.transforms.len();
                 tree.update(&msg);
                 total += n as u64;
-                if !logged_first && n > 0 {
+                if log_every {
+                    log::info!(
+                        "{topic_owned}: +{n} transforms (cumulative {total}; tree size = {})",
+                        tree.frame_count()
+                    );
+                } else if !logged_first && n > 0 {
                     log::info!(
                         "{topic_owned}: first message ({n} transforms; tree size = {})",
                         tree.frame_count()

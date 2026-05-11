@@ -91,9 +91,14 @@ impl SceneGraph {
         self.revision
     }
 
-    /// Insert or replace an entity, marking it dirty.
+    /// Insert or replace an entity, marking it dirty. Visibility is preserved
+    /// across replacement so a user toggle in the UI isn't clobbered by the
+    /// next publish from the ingestion layer.
     pub fn upsert(&mut self, mut entity: SceneEntity) {
         entity.dirty = true;
+        if let Some(existing) = self.entities.get(&entity.id) {
+            entity.visible = existing.visible;
+        }
         self.entities.insert(entity.id, entity);
         self.revision += 1;
     }
@@ -200,6 +205,23 @@ mod tests {
         g.entities.get_mut(&EntityId(2)).unwrap().dirty = false;
         g.update_transform(EntityId(2), Mat4::from_translation(Vec3::X));
         assert!(!g.entities[&EntityId(2)].dirty);
+    }
+
+    #[test]
+    fn upsert_preserves_visibility_across_republish() {
+        let mut g = SceneGraph::default();
+        g.upsert(SceneEntity::new(
+            EntityId(9),
+            ScenePrimitive::Points(vec![]),
+        ));
+        g.set_visible(EntityId(9), false);
+
+        // Simulate the ingestion layer publishing again with a fresh entity.
+        g.upsert(SceneEntity::new(
+            EntityId(9),
+            ScenePrimitive::Points(vec![]),
+        ));
+        assert!(!g.entities[&EntityId(9)].visible);
     }
 
     #[test]

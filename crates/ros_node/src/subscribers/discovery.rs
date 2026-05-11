@@ -20,6 +20,7 @@ use crate::subscribers::{laserscan, occupancy, path, pointcloud, pose};
 // occupancy::MSG_TYPE exists for symmetry but isn't used because the map
 // subscriber is single-topic (no wildcards in M0.5).
 use crate::tf::TfTree;
+use crate::tf_refresh::TfRegistry;
 
 const WILDCARD: &str = "*";
 
@@ -48,11 +49,13 @@ impl Registry {
 
 /// Spawn subscribers for every concrete topic listed in `cfg`. Wildcard
 /// entries (`"*"`) are deferred to [`tick`].
+#[allow(clippy::too_many_arguments)]
 pub fn bootstrap(
     node: &mut r2r::Node,
     spawner: &LocalSpawner,
     scene: SceneHandle,
     tf: Arc<TfTree>,
+    tf_refresh: Arc<TfRegistry>,
     cfg: &RosConfig,
     stats: Arc<RosStats>,
 ) -> Result<Registry> {
@@ -80,10 +83,20 @@ pub fn bootstrap(
         spawn_path(node, spawner, &scene, &tf, cfg, &mut reg, topic)?;
     }
     for topic in cfg.scan_topics.iter().filter(|t| t.as_str() != WILDCARD) {
-        spawn_scan(node, spawner, &scene, &tf, cfg, &mut reg, topic)?;
+        spawn_scan(node, spawner, &scene, &tf, &tf_refresh, cfg, &mut reg, topic)?;
     }
     for topic in cfg.point_topics.iter().filter(|t| t.as_str() != WILDCARD) {
-        spawn_pointcloud(node, spawner, &scene, &tf, cfg, &mut reg, &stats, topic)?;
+        spawn_pointcloud(
+            node,
+            spawner,
+            &scene,
+            &tf,
+            &tf_refresh,
+            cfg,
+            &mut reg,
+            &stats,
+            topic,
+        )?;
     }
 
     if has_wildcard(cfg) {
@@ -94,11 +107,13 @@ pub fn bootstrap(
 
 /// Run one discovery cycle. Cheap when no wildcards are configured; otherwise
 /// asks rcl for the topic snapshot and spawns subscribers for new matches.
+#[allow(clippy::too_many_arguments)]
 pub fn tick(
     node: &mut r2r::Node,
     spawner: &LocalSpawner,
     scene: &SceneHandle,
     tf: &Arc<TfTree>,
+    tf_refresh: &Arc<TfRegistry>,
     cfg: &RosConfig,
     reg: &mut Registry,
     stats: &Arc<RosStats>,
@@ -132,12 +147,12 @@ pub fn tick(
             } else if path_wild && ty == path::MSG_TYPE && !reg.paths.contains_key(topic) {
                 spawn_path(node, spawner, scene, tf, cfg, reg, topic)?;
             } else if scan_wild && ty == laserscan::MSG_TYPE && !reg.scans.contains_key(topic) {
-                spawn_scan(node, spawner, scene, tf, cfg, reg, topic)?;
+                spawn_scan(node, spawner, scene, tf, tf_refresh, cfg, reg, topic)?;
             } else if point_wild
                 && ty == pointcloud::MSG_TYPE
                 && !reg.points.contains_key(topic)
             {
-                spawn_pointcloud(node, spawner, scene, tf, cfg, reg, stats, topic)?;
+                spawn_pointcloud(node, spawner, scene, tf, tf_refresh, cfg, reg, stats, topic)?;
             }
         }
     }
@@ -243,11 +258,13 @@ fn spawn_path(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_scan(
     node: &mut r2r::Node,
     spawner: &LocalSpawner,
     scene: &SceneHandle,
     tf: &Arc<TfTree>,
+    tf_refresh: &Arc<TfRegistry>,
     cfg: &RosConfig,
     reg: &mut Registry,
     topic: &str,
@@ -262,6 +279,7 @@ fn spawn_scan(
         spawner,
         scene.clone(),
         tf.clone(),
+        tf_refresh.clone(),
         cfg.reference_frame.clone(),
         cfg.scan_style.clone(),
         topic.to_string(),
@@ -278,6 +296,7 @@ fn spawn_pointcloud(
     spawner: &LocalSpawner,
     scene: &SceneHandle,
     tf: &Arc<TfTree>,
+    tf_refresh: &Arc<TfRegistry>,
     cfg: &RosConfig,
     reg: &mut Registry,
     stats: &Arc<RosStats>,
@@ -293,6 +312,7 @@ fn spawn_pointcloud(
         spawner,
         scene.clone(),
         tf.clone(),
+        tf_refresh.clone(),
         cfg.reference_frame.clone(),
         cfg.point_style.clone(),
         topic.to_string(),

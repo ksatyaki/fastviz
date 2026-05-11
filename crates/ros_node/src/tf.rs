@@ -55,6 +55,58 @@ impl TfTree {
     pub fn frame_count(&self) -> usize {
         self.frames.read().len()
     }
+
+    /// Walks `frame` up the parent chain and returns the name of the topmost
+    /// reachable ancestor. `None` if the frame itself isn't in the tree.
+    /// Used by subscribers to explain *why* a lookup failed: if the source and
+    /// target reach different roots, the chain is broken there.
+    pub fn root_of(&self, frame: &str) -> Option<String> {
+        let frames = self.frames.read();
+        if !frames.contains_key(frame) && !frames.values().any(|e| e.parent == frame) {
+            return None;
+        }
+        if let Some((_, root)) = walk_to_root(&frames, frame) {
+            Some(root)
+        } else {
+            Some(frame.to_string())
+        }
+    }
+
+    /// One-line human-readable explanation of why `target_T_source` is unavailable.
+    /// Used by laserscan/pointcloud warnings so users see *what's wrong*, not
+    /// just *that* something's wrong.
+    pub fn diagnose_lookup(&self, target: &str, source: &str) -> String {
+        let frames = self.frames.read();
+        let src_present = frames.contains_key(source) || frames.values().any(|e| e.parent == source);
+        let tgt_present = frames.contains_key(target) || frames.values().any(|e| e.parent == target);
+        if !src_present && !tgt_present {
+            return format!(
+                "neither '{source}' nor '{target}' appears in the TF tree ({} frames known)",
+                frames.len()
+            );
+        }
+        if !src_present {
+            return format!("source frame '{source}' not in TF tree");
+        }
+        if !tgt_present {
+            return format!("target frame '{target}' not in TF tree");
+        }
+        let src_root = walk_to_root(&frames, source)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| source.to_string());
+        let tgt_root = walk_to_root(&frames, target)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| target.to_string());
+        if src_root == tgt_root {
+            // Shouldn't happen if lookup returned None, but handle gracefully.
+            format!("chain reaches a common root '{src_root}' but lookup still failed")
+        } else {
+            format!(
+                "chain break: '{source}' reaches root '{src_root}', '{target}' reaches root '{tgt_root}' — \
+                 typically a missing dynamic /tf link or a frame-name mismatch (namespaced vs not)"
+            )
+        }
+    }
 }
 
 fn apply(frames: &mut HashMap<String, TransformEntry>, ts: &TransformStamped) {

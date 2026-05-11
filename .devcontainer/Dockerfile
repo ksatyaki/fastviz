@@ -25,6 +25,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-visualization-msgs \
     && rm -rf /var/lib/apt/lists/*
 
+# TurtleBot 4 simulator (Gazebo Harmonic + irobot_create_* pulled transitively).
+# Kept on ros-base rather than switching to desktop-full: turtlebot4_simulator
+# is third-party (Clearpath), so desktop-full would still need this apt line on
+# top — and ship RViz/demos/tutorials we don't need. xacro is required because
+# turtlebot4_description ships URDFs as .urdf.xacro.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-turtlebot4-simulator \
+        ros-jazzy-turtlebot4-description \
+        ros-jazzy-xacro \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=1000

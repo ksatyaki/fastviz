@@ -91,7 +91,10 @@ impl MeshPass {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                // Backface culling disabled: URDF meshes go through
+                // `ROS_TO_WORLD` (a reflection, det = -1), which flips winding
+                // and would otherwise show only the inside of every mesh.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {

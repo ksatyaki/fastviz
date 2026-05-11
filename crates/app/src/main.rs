@@ -21,10 +21,11 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
-    )
-    .init();
+    // Force-clamp the noisy graphics modules even when RUST_LOG is set, so
+    // wgpu's per-frame Device::maintain INFO lines don't spam the terminal.
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+    let filter = format!("{rust_log},wgpu_core=warn,wgpu_hal=warn,wgpu=warn,naga=warn");
+    env_logger::Builder::new().parse_filters(&filter).init();
 
     let args = Args::parse();
     let event_loop = EventLoop::new()?;
@@ -170,6 +171,10 @@ impl ApplicationHandler for App {
             // CLI --ref-frame takes precedence over the config file value.
             if self.args.ref_frame != "map" {
                 cfg.reference_frame = self.args.ref_frame.clone();
+            }
+            // CLI --urdf takes precedence over the config file value.
+            if let Some(p) = self.args.urdf.as_ref() {
+                cfg.urdf_path = Some(p.clone());
             }
             match ros_node::RosNode::spawn(scene.clone(), cfg) {
                 Ok(n) => Some(n),

@@ -25,6 +25,7 @@ use crate::coords::ROS_TO_WORLD;
 use crate::ids::pointcloud_id;
 use crate::stats::RosStats;
 use crate::tf::TfTree;
+use crate::tf_refresh::TfRegistry;
 
 pub const MSG_TYPE: &str = "sensor_msgs/msg/PointCloud2";
 
@@ -75,6 +76,7 @@ pub fn spawn_topic(
     spawner: &LocalSpawner,
     scene: SceneHandle,
     tf: Arc<TfTree>,
+    tf_refresh: Arc<TfRegistry>,
     reference_frame: String,
     style: PointCloudStyle,
     topic: String,
@@ -98,6 +100,9 @@ pub fn spawn_topic(
     spawner
         .spawn_local(async move {
             let mut first = true;
+            // Re-warn only on success→failure transitions so a continuously
+            // broken TF chain doesn't spam at the publish rate.
+            let mut warned_missing_tf = false;
             let mut points: Vec<Point> = Vec::new();
             while let Some(msg) = sub.next().await {
                 if msg.is_bigendian {
@@ -158,14 +163,23 @@ pub fn spawn_topic(
 
                 let frame = &msg.header.frame_id;
                 let tf_ref_from_frame = if frame == &reference_frame {
+                    warned_missing_tf = false;
                     Mat4::IDENTITY
                 } else {
                     match tf.lookup(&reference_frame, frame) {
-                        Some(m) => m,
+                        Some(m) => {
+                            warned_missing_tf = false;
+                            m
+                        }
                         None => {
-                            log::warn!(
-                                "tf lookup {frame} -> {reference_frame} not yet available; rendering cloud in its own frame"
-                            );
+                            if !warned_missing_tf {
+                                log::warn!(
+                                    "{topic}: tf lookup {frame} -> {reference_frame} unavailable — {}. \
+                                     Rendering cloud at world origin.",
+                                    tf.diagnose_lookup(&reference_frame, frame)
+                                );
+                                warned_missing_tf = true;
+                            }
                             Mat4::IDENTITY
                         }
                     }
@@ -187,6 +201,10 @@ pub fn spawn_topic(
                     .with_transform(transform)
                     .with_label(topic.clone());
                 scene.write().upsert(entity);
+                // (Re-)bind to the registry so late /tf arrivals get applied
+                // by the main loop's refresh pass even if no fresh cloud
+                // message comes in. Points are already in `frame` coords.
+                tf_refresh.register(id, frame.as_str(), Mat4::IDENTITY);
                 stats.pc2_received.fetch_add(1, Ordering::Relaxed);
             }
         })

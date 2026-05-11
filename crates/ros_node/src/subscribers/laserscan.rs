@@ -21,6 +21,7 @@ use crate::config::{QosOverride, ScanStyle};
 use crate::coords::ROS_TO_WORLD;
 use crate::ids::scan_id;
 use crate::tf::TfTree;
+use crate::tf_refresh::TfRegistry;
 
 pub const MSG_TYPE: &str = "sensor_msgs/msg/LaserScan";
 
@@ -30,6 +31,7 @@ pub fn spawn_topic(
     spawner: &LocalSpawner,
     scene: SceneHandle,
     tf: Arc<TfTree>,
+    tf_refresh: Arc<TfRegistry>,
     reference_frame: String,
     style: ScanStyle,
     topic: String,
@@ -51,6 +53,9 @@ pub fn spawn_topic(
     spawner
         .spawn_local(async move {
             let mut first = true;
+            // Re-warn only on success→failure transitions so a continuously
+            // broken TF chain doesn't spam at the scan publish rate.
+            let mut warned_missing_tf = false;
             let mut points: Vec<Point> = Vec::new();
             while let Some(msg) = sub.next().await {
                 points.clear();
@@ -72,14 +77,23 @@ pub fn spawn_topic(
 
                 let frame = &msg.header.frame_id;
                 let tf_ref_from_frame = if frame == &reference_frame {
+                    warned_missing_tf = false;
                     Mat4::IDENTITY
                 } else {
                     match tf.lookup(&reference_frame, frame) {
-                        Some(m) => m,
+                        Some(m) => {
+                            warned_missing_tf = false;
+                            m
+                        }
                         None => {
-                            log::warn!(
-                                "tf lookup {frame} -> {reference_frame} not yet available; rendering scan in its own frame"
-                            );
+                            if !warned_missing_tf {
+                                log::warn!(
+                                    "{topic}: tf lookup {frame} -> {reference_frame} unavailable — {}. \
+                                     Rendering scan at world origin; it will be hidden inside any URDF mesh.",
+                                    tf.diagnose_lookup(&reference_frame, frame)
+                                );
+                                warned_missing_tf = true;
+                            }
                             Mat4::IDENTITY
                         }
                     }
@@ -100,6 +114,11 @@ pub fn spawn_topic(
                     .with_transform(transform)
                     .with_label(topic.clone());
                 scene.write().upsert(entity);
+                // (Re-)bind to the registry so late /tf arrivals get applied
+                // by the main loop's refresh pass even if no fresh scan
+                // message comes in. Points are already in `frame` coords, so
+                // the per-frame local transform is just IDENTITY.
+                tf_refresh.register(id, frame.as_str(), Mat4::IDENTITY);
             }
         })
         .context("spawning laserscan subscriber task")?;

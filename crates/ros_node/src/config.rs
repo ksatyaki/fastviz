@@ -2,7 +2,7 @@
 //!
 //! Two related types live here:
 //! - [`RawConfig`]: the TOML-deserialisable schema (uses `[f32; 3]` for colors,
-//!   plain `Vec<String>` for topics, etc.). This is what `fastviz.toml` maps to.
+//!   plain `Vec<String>` for topics, etc.). This is what `configs/*.toml` maps to.
 //! - [`RosConfig`]: the runtime form consumed by subscribers (uses `scene::Color`,
 //!   already-validated values). Built either via `RosConfig::default()` or
 //!   `RawConfig::into_runtime()`.
@@ -39,6 +39,10 @@ pub struct RosConfig {
     /// Topics carrying `sensor_msgs/PointCloud2`. Each gets one Points entity.
     pub point_topics: Vec<String>,
     pub point_style: PointCloudStyle,
+    /// Optional URDF file. When `Some`, the node loads it at startup and
+    /// updates link transforms from `joint_states_topic`.
+    pub urdf_path: Option<std::path::PathBuf>,
+    pub joint_states_topic: String,
     /// Per-topic QoS overrides (applied on top of each subscriber's default profile).
     pub map_qos: HashMap<String, QosOverride>,
     pub pose_qos: HashMap<String, QosOverride>,
@@ -46,6 +50,7 @@ pub struct RosConfig {
     pub path_qos: HashMap<String, QosOverride>,
     pub scan_qos: HashMap<String, QosOverride>,
     pub point_qos: HashMap<String, QosOverride>,
+    pub joint_states_qos: Option<QosOverride>,
 }
 
 /// Optional per-topic QoS override. Missing fields fall back to the
@@ -177,12 +182,15 @@ impl Default for RosConfig {
             scan_style: ScanStyle::default(),
             point_topics: Vec::new(),
             point_style: PointCloudStyle::default(),
+            urdf_path: None,
+            joint_states_topic: "/joint_states".into(),
             map_qos: HashMap::new(),
             pose_qos: HashMap::new(),
             pose_array_qos: HashMap::new(),
             path_qos: HashMap::new(),
             scan_qos: HashMap::new(),
             point_qos: HashMap::new(),
+            joint_states_qos: None,
         }
     }
 }
@@ -216,6 +224,15 @@ pub struct RawConfig {
     pub paths: Option<RawPaths>,
     pub scans: Option<RawScans>,
     pub points: Option<RawPoints>,
+    pub urdf: Option<RawUrdf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawUrdf {
+    pub path: Option<String>,
+    pub joint_states_topic: Option<String>,
+    pub qos: Option<QosOverride>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -305,6 +322,7 @@ impl RawConfig {
             paths,
             scans,
             points,
+            urdf,
         } = self;
 
         let (map_topic, map_qos) = match map {
@@ -369,6 +387,15 @@ impl RawConfig {
             None => (d.point_topics, d.point_style, d.point_qos),
         };
 
+        let (urdf_path, joint_states_topic, joint_states_qos) = match urdf {
+            Some(u) => (
+                u.path.map(std::path::PathBuf::from),
+                u.joint_states_topic.unwrap_or(d.joint_states_topic),
+                u.qos,
+            ),
+            None => (d.urdf_path, d.joint_states_topic, d.joint_states_qos),
+        };
+
         RosConfig {
             node_name: node_name.unwrap_or(d.node_name),
             namespace: namespace.unwrap_or(d.namespace),
@@ -383,12 +410,15 @@ impl RawConfig {
             scan_style,
             point_topics,
             point_style,
+            urdf_path,
+            joint_states_topic,
             map_qos,
             pose_qos,
             pose_array_qos,
             path_qos,
             scan_qos,
             point_qos,
+            joint_states_qos,
         }
     }
 }

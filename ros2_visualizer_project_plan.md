@@ -42,7 +42,7 @@ Working name: **`fastviz`**. To be revisited at community launch.
 | Point cloud | Custom wgpu pipeline | GPU-side per-entity transform; `revision()`-cached `prepare()` |
 | Mesh/URDF | `urdf-rs` + `stl_io` (binary STL) + `tobj` (OBJ) | DAE deferred |
 | Image display | wgpu texture upload (M1+) | Direct GPU texture, no CPU copy per frame |
-| Config/layout | TOML (`fastviz.toml`) | Schema deserialised via serde; `#[serde(deny_unknown_fields)]` at the top level |
+| Config/layout | TOML (`configs/*.toml`) | Schema deserialised via serde; `#[serde(deny_unknown_fields)]` at the top level |
 | Build system | Cargo workspace | Plays well with ROS2 workspaces but is independent of `colcon` |
 | CI | GitHub Actions | Build, test, clippy, format |
 | Container | Devcontainer (Ubuntu 24.04 + Jazzy) + a release `Dockerfile` | NVIDIA Vulkan via `nvidia-container-toolkit`; X11/Wayland socket passthrough documented |
@@ -354,7 +354,7 @@ impl TfTree {
 schema (TOML 1:1) that converts to runtime `RosConfig`. Missing fields fall
 back to defaults; top-level unknown keys are rejected
 (`#[serde(deny_unknown_fields)]`). New CLI flag `--config <path>`. Repo-root
-[fastviz.toml](fastviz.toml) mirrors `RosConfig::default()` and is the docs
+[configs/default.toml](configs/default.toml) mirrors `RosConfig::default()` and is the docs
 source of truth. CLI `--ref-frame` wins over the config value.
 
 **b. Per-topic QoS overrides.** `QosOverride { reliability, durability, depth }`
@@ -479,7 +479,7 @@ cargo run -p app -- --urdf /opt/ros/jazzy/share/turtlebot3_description/urdf/turt
 
 `SceneGraph::reference_frame` (default `"map"`) is the target for all TF lookups.
 Configurable via CLI (`--ref-frame`) and the `reference_frame` key in
-`fastviz.toml`. CLI wins.
+the loaded config TOML. CLI wins.
 
 ### Visibility and labels
 
@@ -592,7 +592,7 @@ fastviz/
 │   └── ros_node/               # r2r executor on a dedicated thread; TF tree; per-message subscribers; polled discovery
 ├── .devcontainer/              # Ubuntu 24.04 + ROS2 Jazzy
 ├── Dockerfile                  # release image (M0 path)
-├── fastviz.toml                # mirror of RosConfig::default()
+├── configs/                    # *.toml configs (default mirrors RosConfig::default())
 ├── MBABYSTEPS_1.md             # running execution log
 ├── ros2_visualizer_project_plan.md   # this file
 └── README.md

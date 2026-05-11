@@ -33,6 +33,9 @@ r2r = "0.9"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+urdf-rs = "0.9"
+stl_io = "0.11"
+tobj = "4"
 
 [profile.release]
 lto = "thin"

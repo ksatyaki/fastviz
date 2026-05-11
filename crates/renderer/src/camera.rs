@@ -20,7 +20,7 @@ impl Default for OrbitCamera {
         OrbitCamera {
             target: Vec3::ZERO,
             yaw: 0.6,
-            pitch: -0.7,
+            pitch: 0.7,
             distance: 12.0,
             fov_y: 60_f32.to_radians(),
             near: 0.05,
@@ -84,7 +84,7 @@ impl OrbitCamera {
 
     pub fn top_down(&mut self) {
         self.yaw = 0.0;
-        self.pitch = -89_f32.to_radians();
+        self.pitch = 89_f32.to_radians();
     }
 
     pub fn side(&mut self) {

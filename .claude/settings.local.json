@@ -1,0 +1,46 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(rustup update *)",
+      "Bash(cargo clippy *)",
+      "Bash(timeout 6 ./target/debug/app --mock)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(RUST_LOG=warn timeout 4 ./target/debug/app --mock)",
+      "Bash(RUST_LOG=warn timeout 5 ./target/release/app --mock)",
+      "Bash(find ~/.cargo/registry/src -maxdepth 3 -name 'r2r-0.9*' -type d 2>/dev/null | head -3)",
+      "Read(//home/dev/.cargo/registry/src/**)",
+      "Bash(find /home/dev/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/r2r-0.9.5 -name \"build.rs\" | head -2; echo \"---\"; find ~ -path \"*/target/*/r2r_msg_gen*/out\" -prune -o -name \"occupancy*\" -print 2>/dev/null | head; echo \"---\"; find /workspaces/fastviz/target -path \"*r2r*\" -name \"*.rs\" 2>/dev/null | xargs grep -l \"OccupancyGrid\" 2>/dev/null | head -3)",
+      "Read(//home/dev/**)",
+      "Bash(grep -nA 25 \"pub struct OccupancyGrid \" /workspaces/fastviz/target/debug/build/r2r_msg_gen-4f22c0c7e9a877e2/out/msg_bindings.rs)",
+      "Bash(grep -nA 12 \"pub struct MapMetaData \" /workspaces/fastviz/target/debug/build/r2r_msg_gen-4f22c0c7e9a877e2/out/msg_bindings.rs)",
+      "Bash(grep -nA 8 \"pub struct Pose \" /workspaces/fastviz/target/debug/build/r2r_msg_gen-4f22c0c7e9a877e2/out/msg_bindings.rs)",
+      "Bash(grep -nA 8 \"pub struct Quaternion \" /workspaces/fastviz/target/debug/build/r2r_msg_gen-4f22c0c7e9a877e2/out/msg_bindings.rs)",
+      "Bash(grep -nA 8 \"pub struct Point \" /workspaces/fastviz/target/debug/build/r2r_msg_gen-4f22c0c7e9a877e2/out/msg_bindings.rs)",
+      "Bash(grep -nB1 -A 20 \"^pub struct OccupancyGrid \" /workspaces/fastviz/target/debug/build/r2r_msg_gen-4f22c0c7e9a877e2/out/msg_bindings_doc_only.rs)",
+      "Bash(grep -nA 25 \"fn.*[Gg]rid\" /workspaces/fastviz/crates/mock_injector/src/lib.rs)",
+      "Bash(awk '{print $2}')",
+      "Bash(find ~/.claude/projects -name '*.jsonl' -printf '%T@ %p\\\\n' 2>/dev/null | sort -rn | head -50 | awk '{print $2}' > /tmp/recent_jsonl.txt *)",
+      "Read(//tmp/**)",
+      "Bash(find ~/.cargo -name \"lib.rs\" -path \"*r2r*\" 2>/dev/null | head; find /usr -name \"PointCloud2*\" 2>/dev/null | head -5)",
+      "Read(//usr/**)",
+      "Bash(pkill -f \"cargo run\")",
+      "Bash(pkill -f \"target/debug/app\")",
+      "Bash(ps -ef | grep -E \"rosbag2_player|target/debug/app\" | grep -v grep | head; rm -f /tmp/app.pid /tmp/bag.pid; echo done)",
+      "Bash(ls /opt/ros/jazzy/share/ 2>/dev/null | head -40 && echo \"---\" && find /opt/ros/jazzy/share -name \"*.urdf*\" 2>/dev/null | head -10)",
+      "Read(//opt/ros/jazzy/share/**)",
+      "Bash(apt list *)",
+      "Bash(cargo search *)",
+      "Bash(cargo fetch *)",
+      "Bash(cargo check *)",
+      "Bash(timeout 5 ./target/debug/app --urdf /tmp/test-arm.urdf)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(RUST_LOG=info timeout 5 ./target/debug/app --urdf /tmp/test-arm.urdf)"
+    ],
+    "additionalDirectories": [
+      "/tmp"
+    ]
+  }
+}

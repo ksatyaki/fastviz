@@ -7,6 +7,7 @@ pub struct Args {
     pub mock: bool,
     pub ref_frame: String,
     pub config: Option<std::path::PathBuf>,
+    pub urdf: Option<std::path::PathBuf>,
     pub width: u32,
     pub height: u32,
 }
@@ -17,6 +18,7 @@ impl Default for Args {
             mock: false,
             ref_frame: "map".into(),
             config: None,
+            urdf: None,
             width: 1280,
             height: 800,
         }
@@ -44,6 +46,14 @@ impl Args {
                         args.config = Some(s.into());
                     } else {
                         eprintln!("--config requires a path");
+                        std::process::exit(2);
+                    }
+                }
+                "--urdf" => {
+                    if let Some(s) = iter.next() {
+                        args.urdf = Some(s.into());
+                    } else {
+                        eprintln!("--urdf requires a path");
                         std::process::exit(2);
                     }
                 }
@@ -75,7 +85,7 @@ fn print_help() {
     println!(
         "fastviz — ROS2 visualizer\n\
          \n\
-         Usage:\n  app [--mock] [--ref-frame FRAME] [--config PATH] [--width N] [--height N]\n\
+         Usage:\n  app [--mock] [--ref-frame FRAME] [--config PATH] [--urdf PATH] [--width N] [--height N]\n\
          \n\
          The ROS2 node always starts (this is a ROS2 visualizer). --mock layers the\n\
          M0 mock injector on top for testing the rendering pipeline.\n\
