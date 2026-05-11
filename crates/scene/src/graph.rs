@@ -35,6 +35,12 @@ pub struct SceneEntity {
     /// Set by the ingestion layer when the primitive payload changes.
     /// Cleared by the renderer after the GPU buffer is updated.
     pub dirty: bool,
+    /// Bumped on every payload change (upsert / update_primitive). The renderer
+    /// caches `last_uploaded_revision` per entity and only re-uploads vertex /
+    /// index buffers when this counter advances — so transform-only updates
+    /// (e.g. URDF joint motion, TF refreshes) don't re-stream geometry that
+    /// hasn't actually changed.
+    pub revision: u64,
 }
 
 impl SceneEntity {
@@ -46,6 +52,7 @@ impl SceneEntity {
             primitive,
             visible: true,
             dirty: true,
+            revision: 1,
         }
     }
 
@@ -98,6 +105,9 @@ impl SceneGraph {
         entity.dirty = true;
         if let Some(existing) = self.entities.get(&entity.id) {
             entity.visible = existing.visible;
+            // Monotonic per-entity revision across re-publishes, so consumers
+            // (e.g. MeshPass) can detect "this is new payload data".
+            entity.revision = existing.revision.wrapping_add(1);
         }
         self.entities.insert(entity.id, entity);
         self.revision += 1;
@@ -108,6 +118,7 @@ impl SceneGraph {
         if let Some(e) = self.entities.get_mut(&id) {
             e.primitive = primitive;
             e.dirty = true;
+            e.revision = e.revision.wrapping_add(1);
             self.revision += 1;
         }
     }
@@ -222,6 +233,26 @@ mod tests {
             ScenePrimitive::Points(vec![]),
         ));
         assert!(!g.entities[&EntityId(9)].visible);
+    }
+
+    #[test]
+    fn revision_advances_only_on_payload_change() {
+        // The MeshPass relies on this: transform-only updates (joint motion /
+        // TF refresh) must NOT bump entity.revision, otherwise URDF geometry
+        // gets re-uploaded to the GPU every frame.
+        let mut g = SceneGraph::default();
+        g.upsert(SceneEntity::new(EntityId(11), ScenePrimitive::Points(vec![])));
+        let rev0 = g.entities[&EntityId(11)].revision;
+
+        g.update_transform(EntityId(11), Mat4::from_translation(Vec3::X));
+        assert_eq!(g.entities[&EntityId(11)].revision, rev0, "transform update bumped revision");
+
+        g.update_primitive(EntityId(11), ScenePrimitive::Points(vec![]));
+        assert!(g.entities[&EntityId(11)].revision > rev0, "update_primitive should bump");
+
+        let rev1 = g.entities[&EntityId(11)].revision;
+        g.upsert(SceneEntity::new(EntityId(11), ScenePrimitive::Points(vec![])));
+        assert!(g.entities[&EntityId(11)].revision > rev1, "re-upsert should bump");
     }
 
     #[test]

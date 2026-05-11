@@ -1,4 +1,6 @@
-//! Subscribers for `/tf` (volatile) and `/tf_static` (transient_local).
+//! Subscribers for the dynamic-frame TF topic (default `/tf`, volatile) and
+//! the static-frame TF topic (default `/tf_static`, transient_local). Both
+//! topic names come from `RosConfig` and can be remapped in TOML.
 //!
 //! Both feed the same `TfTree`; static messages just have latched durability
 //! so late subscribers get the latest set.
@@ -12,31 +14,48 @@ use futures::task::LocalSpawnExt;
 use r2r::qos::DurabilityPolicy;
 use r2r::{tf2_msgs, QosProfile};
 
+use crate::config::{QosOverride, RosConfig};
 use crate::tf::TfTree;
 
-pub fn spawn(node: &mut r2r::Node, spawner: &LocalSpawner, tree: Arc<TfTree>) -> Result<()> {
+pub fn spawn(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    tree: Arc<TfTree>,
+    cfg: &RosConfig,
+) -> Result<()> {
     spawn_one(
         node,
         spawner,
         tree.clone(),
-        "/tf",
-        QosProfile::default().keep_last(100),
+        &cfg.tf_topic,
+        apply_qos(QosProfile::default().keep_last(100), cfg.tf_qos.as_ref()),
         false,
     )?;
-    // `/tf_static` is low-rate (latched messages, one per publisher) but
-    // load-bearing for every downstream lookup. Log every message at INFO so
-    // misconfigurations show up immediately rather than disappearing into TRACE.
+    // The static TF topic is low-rate (latched messages, one per publisher)
+    // but load-bearing for every downstream lookup. Log every message at INFO
+    // so misconfigurations show up immediately rather than disappearing into
+    // TRACE.
     spawn_one(
         node,
         spawner,
         tree,
-        "/tf_static",
-        QosProfile::default()
-            .keep_last(100)
-            .durability(DurabilityPolicy::TransientLocal),
+        &cfg.tf_static_topic,
+        apply_qos(
+            QosProfile::default()
+                .keep_last(100)
+                .durability(DurabilityPolicy::TransientLocal),
+            cfg.tf_static_qos.as_ref(),
+        ),
         true,
     )?;
     Ok(())
+}
+
+fn apply_qos(base: QosProfile, o: Option<&QosOverride>) -> QosProfile {
+    match o {
+        Some(o) => o.apply(base),
+        None => base,
+    }
 }
 
 fn spawn_one(

@@ -17,5 +17,4 @@ glam = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 urdf-rs = { workspace = true }
-stl_io = { workspace = true }
-tobj = { workspace = true }
+mesh-loader = { workspace = true }

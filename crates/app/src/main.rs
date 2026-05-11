@@ -49,6 +49,8 @@ struct AppContext {
     mock: Option<MockInjector>,
     #[cfg(feature = "ros")]
     ros: Option<ros_node::RosNode>,
+    /// Side-panel grouping config. Empty = flat list.
+    ui_groups: Vec<ui::UiGroupView>,
     input: InputState,
     show_reference_grid: bool,
     /// PC2 messages we've witnessed in `RosStats` so far. Compared to the
@@ -154,7 +156,7 @@ impl ApplicationHandler for App {
         };
 
         #[cfg(feature = "ros")]
-        let ros = {
+        let (ros, ui_groups) = {
             let mut cfg = match self.args.config.as_deref() {
                 Some(p) => match ros_node::RosConfig::from_path(p) {
                     Ok(c) => {
@@ -176,14 +178,18 @@ impl ApplicationHandler for App {
             if let Some(p) = self.args.urdf.as_ref() {
                 cfg.urdf_path = Some(p.clone());
             }
-            match ros_node::RosNode::spawn(scene.clone(), cfg) {
+            let groups = ui::UiGroupView::from_config(&cfg.ui_groups);
+            let n = match ros_node::RosNode::spawn(scene.clone(), cfg) {
                 Ok(n) => Some(n),
                 Err(e) => {
                     log::error!("failed to start ros2 node: {e:#}");
                     None
                 }
-            }
+            };
+            (n, groups)
         };
+        #[cfg(not(feature = "ros"))]
+        let ui_groups: Vec<ui::UiGroupView> = Vec::new();
 
         window.request_redraw();
 
@@ -195,6 +201,7 @@ impl ApplicationHandler for App {
             mock,
             #[cfg(feature = "ros")]
             ros,
+            ui_groups,
             input: InputState::default(),
             show_reference_grid: true,
             pc2_last_seen_received: 0,
@@ -357,9 +364,18 @@ impl AppContext {
             let scene = self.scene.clone();
             let camera = &mut self.renderer.camera;
             let show_grid = &mut self.show_reference_grid;
+            let groups = &mut self.ui_groups;
             self.egui.run_ui(&window, |egui_ctx| {
                 let mut scene = scene.write();
-                ui::draw(egui_ctx, &mut scene, camera, stats, show_grid, pc2_stats);
+                ui::draw(
+                    egui_ctx,
+                    &mut scene,
+                    camera,
+                    stats,
+                    show_grid,
+                    pc2_stats,
+                    groups,
+                );
             })
         };
 

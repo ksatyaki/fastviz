@@ -36,6 +36,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-xacro \
     && rm -rf /var/lib/apt/lists/*
 
+# Clearpath simulator + Nav2 demos (Husky A200 etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-clearpath-simulator \
+        ros-jazzy-clearpath-nav2-demos \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG USERNAME=dev
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -67,6 +73,13 @@ USER ${USERNAME}
 # Auto-source ROS2 in interactive shells; r2r needs LIBCLANG_PATH at build time.
 RUN echo 'source /opt/ros/jazzy/setup.bash' >> /home/${USERNAME}/.bashrc \
  && echo 'export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu' >> /home/${USERNAME}/.bashrc
+
+# Seed Clearpath robot config (Husky A200 + Velodyne sample) and clear its
+# namespace so topics publish at the root rather than under /a200_0000.
+RUN mkdir -p /home/${USERNAME}/clearpath \
+ && cp /opt/ros/jazzy/share/clearpath_config/sample/a200_velodyne.yaml \
+       /home/${USERNAME}/clearpath/robot.yaml \
+ && sed -i 's|namespace: /a200_0000|namespace: /|' /home/${USERNAME}/clearpath/robot.yaml
 
 WORKDIR /workspaces/fastviz
 CMD ["/bin/bash"]

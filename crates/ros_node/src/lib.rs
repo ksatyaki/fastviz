@@ -15,6 +15,7 @@ pub mod tf;
 pub mod tf_refresh;
 pub mod urdf;
 
-pub use config::RosConfig;
+pub use config::{RosConfig, UiGroup};
+pub use ids::URDF_LINK_BASE;
 pub use node::RosNode;
 pub use stats::RosStats;

@@ -42,7 +42,20 @@ pub struct RosConfig {
     /// Optional URDF file. When `Some`, the node loads it at startup and
     /// updates link transforms from `joint_states_topic`.
     pub urdf_path: Option<std::path::PathBuf>,
+    /// Optional `std_msgs/String` topic carrying the URDF XML
+    /// (e.g. `/robot_description`). If `Some` and `urdf_path` is `None`, the
+    /// node subscribes (TRANSIENT_LOCAL by default) and parses the URDF as
+    /// soon as the first message arrives.
+    pub urdf_topic: Option<String>,
+    pub urdf_topic_qos: Option<QosOverride>,
     pub joint_states_topic: String,
+    /// `tf2_msgs/TFMessage` dynamic-frame topic. Defaults to `/tf`.
+    pub tf_topic: String,
+    /// `tf2_msgs/TFMessage` latched static-frame topic. Defaults to
+    /// `/tf_static`.
+    pub tf_static_topic: String,
+    pub tf_qos: Option<QosOverride>,
+    pub tf_static_qos: Option<QosOverride>,
     /// Per-topic QoS overrides (applied on top of each subscriber's default profile).
     pub map_qos: HashMap<String, QosOverride>,
     pub pose_qos: HashMap<String, QosOverride>,
@@ -51,6 +64,21 @@ pub struct RosConfig {
     pub scan_qos: HashMap<String, QosOverride>,
     pub point_qos: HashMap<String, QosOverride>,
     pub joint_states_qos: Option<QosOverride>,
+    /// Side-panel grouping. Each group renders as a collapsible egui section
+    /// in the order it appears here. Empty = current flat list behavior.
+    pub ui_groups: Vec<UiGroup>,
+}
+
+/// One side-panel group. Entities are matched by exact label (topic name) and
+/// rendered in the order topics appear in `topics`. With `urdf = true`, every
+/// URDF link is appended to the group (in link order).
+#[derive(Clone, Debug)]
+pub struct UiGroup {
+    pub name: String,
+    pub topics: Vec<String>,
+    pub urdf: bool,
+    /// Initial fold state. Toggleable in the UI; this is just the default.
+    pub collapsed: bool,
 }
 
 /// Optional per-topic QoS override. Missing fields fall back to the
@@ -183,7 +211,13 @@ impl Default for RosConfig {
             point_topics: Vec::new(),
             point_style: PointCloudStyle::default(),
             urdf_path: None,
+            urdf_topic: None,
+            urdf_topic_qos: None,
             joint_states_topic: "/joint_states".into(),
+            tf_topic: "/tf".into(),
+            tf_static_topic: "/tf_static".into(),
+            tf_qos: None,
+            tf_static_qos: None,
             map_qos: HashMap::new(),
             pose_qos: HashMap::new(),
             pose_array_qos: HashMap::new(),
@@ -191,6 +225,7 @@ impl Default for RosConfig {
             scan_qos: HashMap::new(),
             point_qos: HashMap::new(),
             joint_states_qos: None,
+            ui_groups: Vec::new(),
         }
     }
 }
@@ -225,14 +260,57 @@ pub struct RawConfig {
     pub scans: Option<RawScans>,
     pub points: Option<RawPoints>,
     pub urdf: Option<RawUrdf>,
+    pub tf: Option<RawTf>,
+    pub ui: Option<RawUi>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawUi {
+    /// `[[ui.group]]` array of tables. Each one becomes a collapsible section
+    /// in the side panel, rendered in TOML order.
+    pub group: Vec<RawUiGroup>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawUiGroup {
+    pub name: String,
+    /// Entity labels (topic names) that belong to this group. Matched against
+    /// the first whitespace-separated token of `entity.label`, so
+    /// `/map [map]` matches `topics = ["/map"]`.
+    pub topics: Vec<String>,
+    /// When true, every URDF link is appended to the group.
+    pub urdf: bool,
+    /// Default fold state — toggleable at runtime.
+    pub collapsed: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RawUrdf {
+    /// Path to a URDF or xacro file on disk.
     pub path: Option<String>,
+    /// `std_msgs/String` topic carrying the URDF XML (typically
+    /// `/robot_description`, published by `robot_state_publisher`).
+    pub topic: Option<String>,
     pub joint_states_topic: Option<String>,
+    /// QoS override for `joint_states_topic`.
     pub qos: Option<QosOverride>,
+    /// QoS override for the URDF topic (`topic`). Defaults to TRANSIENT_LOCAL
+    /// so latched publishers are picked up.
+    pub topic_qos: Option<QosOverride>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawTf {
+    /// Dynamic-frame topic, default `/tf`.
+    pub topic: Option<String>,
+    /// Static (latched) frame topic, default `/tf_static`.
+    pub static_topic: Option<String>,
+    pub qos: Option<QosOverride>,
+    pub static_qos: Option<QosOverride>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -323,6 +401,8 @@ impl RawConfig {
             scans,
             points,
             urdf,
+            tf,
+            ui,
         } = self;
 
         let (map_topic, map_qos) = match map {
@@ -387,14 +467,47 @@ impl RawConfig {
             None => (d.point_topics, d.point_style, d.point_qos),
         };
 
-        let (urdf_path, joint_states_topic, joint_states_qos) = match urdf {
-            Some(u) => (
-                u.path.map(std::path::PathBuf::from),
-                u.joint_states_topic.unwrap_or(d.joint_states_topic),
-                u.qos,
+        let (urdf_path, urdf_topic, urdf_topic_qos, joint_states_topic, joint_states_qos) =
+            match urdf {
+                Some(u) => (
+                    u.path.map(std::path::PathBuf::from),
+                    u.topic,
+                    u.topic_qos,
+                    u.joint_states_topic.unwrap_or(d.joint_states_topic),
+                    u.qos,
+                ),
+                None => (
+                    d.urdf_path,
+                    d.urdf_topic,
+                    d.urdf_topic_qos,
+                    d.joint_states_topic,
+                    d.joint_states_qos,
+                ),
+            };
+
+        let (tf_topic, tf_static_topic, tf_qos, tf_static_qos) = match tf {
+            Some(t) => (
+                t.topic.unwrap_or(d.tf_topic),
+                t.static_topic.unwrap_or(d.tf_static_topic),
+                t.qos,
+                t.static_qos,
             ),
-            None => (d.urdf_path, d.joint_states_topic, d.joint_states_qos),
+            None => (d.tf_topic, d.tf_static_topic, d.tf_qos, d.tf_static_qos),
         };
+
+        let ui_groups = ui
+            .map(|u| {
+                u.group
+                    .into_iter()
+                    .map(|g| UiGroup {
+                        name: g.name,
+                        topics: g.topics,
+                        urdf: g.urdf,
+                        collapsed: g.collapsed,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         RosConfig {
             node_name: node_name.unwrap_or(d.node_name),
@@ -411,7 +524,13 @@ impl RawConfig {
             point_topics,
             point_style,
             urdf_path,
+            urdf_topic,
+            urdf_topic_qos,
             joint_states_topic,
+            tf_topic,
+            tf_static_topic,
+            tf_qos,
+            tf_static_qos,
             map_qos,
             pose_qos,
             pose_array_qos,
@@ -419,6 +538,7 @@ impl RawConfig {
             scan_qos,
             point_qos,
             joint_states_qos,
+            ui_groups,
         }
     }
 }
@@ -536,6 +656,78 @@ mod tests {
         assert!(q.durability.is_none());
         // Other topic has no override
         assert!(!cfg.scan_qos.contains_key("/scan_front"));
+    }
+
+    #[test]
+    fn urdf_topic_section_parses() {
+        let toml = r#"
+            [urdf]
+            topic = "/robot_description"
+            joint_states_topic = "/jstates"
+            [urdf.topic_qos]
+            durability = "transient_local"
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        assert_eq!(cfg.urdf_topic.as_deref(), Some("/robot_description"));
+        assert_eq!(cfg.urdf_path, None);
+        assert_eq!(cfg.joint_states_topic, "/jstates");
+        assert_eq!(
+            cfg.urdf_topic_qos.as_ref().unwrap().durability.as_deref(),
+            Some("transient_local")
+        );
+    }
+
+    #[test]
+    fn tf_section_overrides_topics() {
+        let toml = r#"
+            [tf]
+            topic        = "/robot/tf"
+            static_topic = "/robot/tf_static"
+            [tf.qos]
+            reliability = "best_effort"
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        assert_eq!(cfg.tf_topic, "/robot/tf");
+        assert_eq!(cfg.tf_static_topic, "/robot/tf_static");
+        assert_eq!(
+            cfg.tf_qos.as_ref().unwrap().reliability.as_deref(),
+            Some("best_effort")
+        );
+        assert!(cfg.tf_static_qos.is_none());
+    }
+
+    #[test]
+    fn ui_groups_parse_in_order() {
+        let toml = r#"
+            [[ui.group]]
+            name   = "Sensors"
+            topics = ["/scan", "/points"]
+
+            [[ui.group]]
+            name      = "Robot Description"
+            urdf      = true
+            collapsed = true
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        assert_eq!(cfg.ui_groups.len(), 2);
+        assert_eq!(cfg.ui_groups[0].name, "Sensors");
+        assert_eq!(cfg.ui_groups[0].topics, vec!["/scan", "/points"]);
+        assert!(!cfg.ui_groups[0].urdf);
+        assert!(!cfg.ui_groups[0].collapsed);
+        assert_eq!(cfg.ui_groups[1].name, "Robot Description");
+        assert!(cfg.ui_groups[1].urdf);
+        assert!(cfg.ui_groups[1].collapsed);
+    }
+
+    #[test]
+    fn tf_defaults_when_omitted() {
+        let raw: RawConfig = toml::from_str("").unwrap();
+        let cfg = raw.into_runtime();
+        assert_eq!(cfg.tf_topic, "/tf");
+        assert_eq!(cfg.tf_static_topic, "/tf_static");
     }
 
     #[test]

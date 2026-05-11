@@ -1,10 +1,9 @@
 # fastviz config for the TurtleBot 4 Gazebo Harmonic simulation.
 # Run with:
-#   cargo run -p app -- --ros --no-mock --config configs/turtlebot4.toml
+#   cargo run -p app -- --config configs/turtlebot4.toml
 #
-# The URDF ships as xacro; expand it once before launching fastviz:
-#   xacro $(ros2 pkg prefix turtlebot4_description)/share/turtlebot4_description/urdf/standard/turtlebot4.urdf.xacro \
-#     > /tmp/turtlebot4.urdf
+# `robot_state_publisher` latches the expanded URDF on `/robot_description`,
+# so we pick it up straight off the topic — no need to pre-expand the xacro.
 #
 # Sim is launched separately, e.g.:
 #   ros2 launch turtlebot4_ignition_bringup turtlebot4_ignition.launch.py
@@ -15,6 +14,10 @@ namespace       = ""
 # SLAM/Nav2 are running. Use odom so the robot appears immediately.
 reference_frame = "odom"
 
+[urdf]
+topic              = "/robot_description"
+joint_states_topic = "/joint_states"
+
 # sensor_msgs/LaserScan — RPLidar A1 on the TurtleBot 4.
 [scans]
 topics = ["/sensors/lidar3d_0/scan"]
@@ -24,3 +27,14 @@ style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
 [points]
 topics = ["/sensors/lidar3d_0/points"]
 style  = { size = 2.0, color = [0.30, 0.45, 1.0], stride = 2 }
+
+# Side-panel folders. The TurtleBot 4 URDF expands to ~30 links, so we tuck
+# them into a collapsed "Robot Description" group by default.
+[[ui.group]]
+name   = "Sensors"
+topics = ["/sensors/lidar3d_0/scan", "/sensors/lidar3d_0/points"]
+
+[[ui.group]]
+name      = "Robot Description"
+urdf      = true
+collapsed = true

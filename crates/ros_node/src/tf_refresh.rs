@@ -13,7 +13,7 @@
 //! So as soon as the missing TF link arrives, the next refresh fixes every
 //! stale entity without needing a fresh sensor message.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use glam::Mat4;
@@ -28,14 +28,18 @@ struct Entry {
     frame: String,
     /// Entity pose in `frame`'s coordinates (ROS, right-handed Z-up).
     /// For sensor points already expressed in `frame`, this is `IDENTITY`.
-    /// For URDF visuals expressed in the root link's frame, this is the
-    /// link's `root_T_link * visual_origin`.
+    /// For URDF visuals expressed in the link's own frame, this is the
+    /// link's `<visual><origin>` offset.
     local: Mat4,
 }
 
 #[derive(Default)]
 pub struct TfRegistry {
     entries: Mutex<HashMap<EntityId, Entry>>,
+    /// Entities we've already warned about (lookup failed). Prevents the
+    /// per-tick refresh from spamming logs for a steadily-missing frame —
+    /// users only see one warning per affected entity per process.
+    warned: Mutex<HashSet<EntityId>>,
 }
 
 impl TfRegistry {
@@ -54,11 +58,15 @@ impl TfRegistry {
                 local,
             },
         );
+        // Fresh registration may resolve a previously-broken lookup; let the
+        // warning fire again if it doesn't.
+        self.warned.lock().remove(&id);
     }
 
     /// Forget an entity (e.g., when its publisher disappears). Idempotent.
     pub fn unregister(&self, id: EntityId) {
         self.entries.lock().remove(&id);
+        self.warned.lock().remove(&id);
     }
 
     /// Recompute world transforms for every registered entity and push them
@@ -70,6 +78,8 @@ impl TfRegistry {
         if entries.is_empty() {
             return;
         }
+        let mut to_warn: Vec<(EntityId, String, String)> = Vec::new();
+        let mut warned = self.warned.lock();
         let mut scene_w = scene.write();
         for (id, entry) in entries.iter() {
             let tf_ref_from_frame = if entry.frame == reference_frame {
@@ -77,11 +87,30 @@ impl TfRegistry {
             } else {
                 match tf.lookup(reference_frame, &entry.frame) {
                     Some(m) => m,
-                    None => continue,
+                    None => {
+                        if warned.insert(*id) {
+                            to_warn.push((
+                                *id,
+                                entry.frame.clone(),
+                                tf.diagnose_lookup(reference_frame, &entry.frame),
+                            ));
+                        }
+                        continue;
+                    }
                 }
             };
             let world = ROS_TO_WORLD * tf_ref_from_frame * entry.local;
             scene_w.update_transform(*id, world);
+        }
+        drop(scene_w);
+        drop(warned);
+        for (id, frame, diag) in to_warn {
+            log::warn!(
+                "tf-refresh: entity #{} frame='{}' lookup failed — {}. Keeping the FK fallback transform.",
+                id.0,
+                frame,
+                diag,
+            );
         }
     }
 }

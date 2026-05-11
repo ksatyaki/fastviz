@@ -1,6 +1,9 @@
 //! Mesh pass: renders all `Mesh` entities. Each entity owns its own GPU vertex
 //! and index buffers, allocated lazily on first sight of a new entity ID and
-//! re-uploaded only when the entity's `dirty` flag is set.
+//! re-uploaded only when the entity's `revision` advances past the cached
+//! `uploaded_revision` — so URDF link geometry (which is static after load) is
+//! streamed to the GPU exactly once, even though `entity.transform` may change
+//! every frame as joint state / TF updates flow in.
 
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
@@ -11,7 +14,7 @@ use scene::{EntityId, Mesh, SceneGraph, ScenePrimitive, Vertex};
 use crate::gpu::{GpuContext, DEPTH_FORMAT};
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, PartialEq, Pod, Zeroable)]
 struct InstanceUniform {
     model: [[f32; 4]; 4],
     color: [f32; 4],
@@ -24,6 +27,16 @@ struct GpuMesh {
     instance_buffer: wgpu::Buffer,
     instance_bind_group: wgpu::BindGroup,
     wireframe: bool,
+    /// `entity.revision` of the geometry currently sitting in the vertex /
+    /// index buffers. Compared against the live entity each frame; if equal,
+    /// we skip the upload entirely (the common case once URDF is loaded).
+    uploaded_revision: u64,
+    /// Last `InstanceUniform` written to `instance_buffer`. Lets us skip the
+    /// 80-byte per-frame `write_buffer` when the transform + color are
+    /// unchanged from last frame.
+    last_instance: InstanceUniform,
+    /// Whether `last_instance` reflects what's actually on the GPU yet.
+    instance_uploaded: bool,
 }
 
 pub struct MeshPass {
@@ -128,15 +141,33 @@ impl MeshPass {
             };
 
             if !self.meshes.contains_key(&entity.id) {
-                self.meshes
-                    .insert(entity.id, create_gpu_mesh(gpu, &self.instance_bgl, mesh));
+                // `create_gpu_mesh` already uploads geometry once; record the
+                // entity's current revision so the prepare loop below doesn't
+                // re-upload immediately afterwards.
+                let mut gm = create_gpu_mesh(gpu, &self.instance_bgl, mesh);
+                gm.uploaded_revision = entity.revision;
+                self.meshes.insert(entity.id, gm);
             }
             let gm = self.meshes.get_mut(&entity.id).unwrap();
-            if entity.visible && entity.dirty {
+
+            // Geometry: re-upload only when the entity's payload has actually
+            // changed since the last frame we saw it. URDF links hit this once
+            // (at insert time) and then never again — joint motion is just
+            // transform updates.
+            if gm.uploaded_revision != entity.revision {
                 upload_mesh_geometry(gpu, gm, mesh);
+                gm.uploaded_revision = entity.revision;
             }
-            gpu.queue
-                .write_buffer(&gm.instance_buffer, 0, bytemuck::bytes_of(&inst));
+
+            // Instance uniform: 80 bytes, but multiplied by many links + draws
+            // per second it still shows up — skip the queue write when nothing
+            // changed.
+            if !gm.instance_uploaded || gm.last_instance != inst {
+                gpu.queue
+                    .write_buffer(&gm.instance_buffer, 0, bytemuck::bytes_of(&inst));
+                gm.last_instance = inst;
+                gm.instance_uploaded = true;
+            }
             gm.wireframe = mesh.material.wireframe;
         }
 
@@ -209,6 +240,9 @@ fn create_gpu_mesh(
         instance_buffer,
         instance_bind_group,
         wireframe: mesh.material.wireframe,
+        uploaded_revision: 0,
+        last_instance: InstanceUniform::zeroed(),
+        instance_uploaded: false,
     };
     upload_mesh_geometry(gpu, &mut gm, mesh);
     gm

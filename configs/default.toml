@@ -1,41 +1,139 @@
-# fastviz ROS configuration.
-# Loaded with: cargo run -p app -- --ros --config fastviz.toml
+# fastviz ROS configuration — full reference.
+# Loaded with: cargo run -p app -- --config configs/default.toml
 #
-# The values below mirror RosConfig::default() in crates/ros_node/src/config.rs.
-# Any section you omit falls back to those defaults.
+# Every active value below mirrors RosConfig::default() in
+# crates/ros_node/src/config.rs. Commented-out lines show optional knobs
+# (with their default behaviour) so you can uncomment what you need.
+# Any section you omit falls back to the defaults shown here.
 
 node_name       = "fastviz"
 namespace       = ""
-reference_frame = "depth_camera_link"
+reference_frame = "map"
 
-[points]
-topics = ["/points2/decompressed"]
+# ---------------------------------------------------------------------------
+# /tf and /tf_static remapping + per-topic QoS.
+# ---------------------------------------------------------------------------
+# `topic` / `static_topic` let you point at namespaced TF topics
+# (e.g. "/robot1/tf"). QoS blocks are optional — defaults match RViz
+# (volatile for /tf, transient_local for /tf_static).
+[tf]
+topic        = "/tf"
+static_topic = "/tf_static"
+# [tf.qos]
+# reliability = "reliable"        # "reliable" | "best_effort"
+# durability  = "volatile"        # "volatile" | "transient_local" | "best_available"
+# depth       = 100
+# [tf.static_qos]
+# reliability = "reliable"
+# durability  = "transient_local"
+# depth       = 1
 
-# nav_msgs/OccupancyGrid. M0.5 supports a single map topic.
+# ---------------------------------------------------------------------------
+# Robot model.
+# ---------------------------------------------------------------------------
+# EITHER set `path` (a URDF or xacro file on disk) OR `topic` (a
+# `std_msgs/String` topic carrying the URDF XML, typically
+# `/robot_description` published by `robot_state_publisher`).
+# When both are set, `path` wins. Mesh files referenced from the URDF can be
+# `.stl`, `.obj`, or `.dae` (Collada). `package://` URIs are resolved through
+# `AMENT_PREFIX_PATH`.
+[urdf]
+# path               = "/path/to/robot.urdf"
+# topic              = "/robot_description"
+joint_states_topic = "/joint_states"
+# QoS override for the URDF topic. Defaults to TRANSIENT_LOCAL so
+# `robot_state_publisher`'s latched message is picked up.
+# [urdf.topic_qos]
+# durability = "transient_local"
+# depth      = 1
+# QoS override for `joint_states_topic`.
+# [urdf.qos]
+# reliability = "best_effort"
+# depth       = 10
+
+# ---------------------------------------------------------------------------
+# nav_msgs/OccupancyGrid — single topic (first entry wins).
+# ---------------------------------------------------------------------------
 [map]
 topics = ["/map"]
+# Per-topic QoS override. `/map` is usually latched, so transient_local helps
+# pick up a map published before fastviz started.
+# [map.qos."/map"]
+# durability  = "transient_local"
+# reliability = "reliable"
 
+# ---------------------------------------------------------------------------
 # geometry_msgs/PoseStamped — one Arrow per topic.
+# Use ["*"] to subscribe to every PoseStamped publisher visible on the graph.
+# ---------------------------------------------------------------------------
 [poses]
 topics = ["/goal_pose"]
+# [poses.qos."/goal_pose"]
+# reliability = "reliable"
 
+# ---------------------------------------------------------------------------
 # geometry_msgs/PoseArray — one entity holding many Arrows per topic.
+# `["*"]` supported as above.
+# ---------------------------------------------------------------------------
 [pose_arrays]
 topics = ["/particle_cloud"]
+# [pose_arrays.qos."/particle_cloud"]
+# reliability = "best_effort"
 
-# Shared style for both pose kinds above.
+# Shared style for the two pose kinds above.
 [arrow]
 length       = 0.5
 shaft_radius = 0.025
 head_radius  = 0.06
 color        = [0.95, 0.55, 0.10]
 
-# nav_msgs/Path — one Polyline per topic.
+# ---------------------------------------------------------------------------
+# nav_msgs/Path — one Polyline per topic. `["*"]` supported.
+# ---------------------------------------------------------------------------
 [paths]
 topics = ["/plan"]
 style  = { width = 2.0, color = [0.20, 0.85, 0.30] }
+# [paths.qos."/plan"]
+# reliability = "reliable"
 
-# sensor_msgs/LaserScan — one Points entity per topic.
+# ---------------------------------------------------------------------------
+# sensor_msgs/LaserScan — one Points entity per topic. `["*"]` supported.
+# ---------------------------------------------------------------------------
 [scans]
 topics = ["/scan"]
 style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
+# [scans.qos."/scan"]
+# reliability = "best_effort"
+# depth       = 5
+
+# ---------------------------------------------------------------------------
+# sensor_msgs/PointCloud2 — one Points entity per topic. `["*"]` supported.
+# `stride` decimates dense clouds (keep 1 of every N points).
+# ---------------------------------------------------------------------------
+[points]
+topics = []
+style  = { size = 2.0, color = [0.30, 0.85, 1.0], stride = 1 }
+# [points.qos."/camera/points"]
+# reliability = "best_effort"
+# depth       = 5
+
+# ---------------------------------------------------------------------------
+# Side-panel grouping. Each [[ui.group]] becomes a collapsible folder in the
+# entity list (rendered in the order below); entities not matched by any
+# group render flat at the bottom. `topics` matches the first whitespace-
+# separated token of the entity label, so `/map` matches `/map [<frame>]`.
+# `urdf = true` rolls every URDF link into the group. `collapsed = true`
+# starts the folder closed (toggle at runtime).
+# ---------------------------------------------------------------------------
+# [[ui.group]]
+# name   = "Sensors"
+# topics = ["/scan"]
+#
+# [[ui.group]]
+# name   = "Planning"
+# topics = ["/plan", "/goal_pose", "/particle_cloud"]
+#
+# [[ui.group]]
+# name      = "Robot Description"
+# urdf      = true
+# collapsed = true

@@ -16,9 +16,18 @@ use crate::passes::{
 /// Per-frame timing for HUD display.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct FrameStats {
+    /// Raw wall-clock between the previous and current frame.
     pub last_frame_seconds: f32,
+    /// Same value smoothed with a ~0.25 s exponential moving average so the HUD
+    /// FPS readout doesn't flicker every frame. UI code should prefer this.
+    pub smoothed_frame_seconds: f32,
     pub frame_index: u64,
 }
+
+/// Time constant for the FPS lowpass — values within `~TAU` seconds dominate.
+/// Tuned so the readout settles in well under a second but still rejects the
+/// jitter you'd get from any single frame stalling on swapchain acquisition.
+const FRAME_TIME_LOWPASS_TAU: f32 = 0.25;
 
 pub struct Renderer {
     pub gpu: GpuContext,
@@ -79,8 +88,19 @@ impl Renderer {
         F: FnMut(OverlayContext<'_>),
     {
         let now = Instant::now();
-        self.stats.last_frame_seconds = (now - self.last_frame_at).as_secs_f32();
+        let dt = (now - self.last_frame_at).as_secs_f32();
         self.last_frame_at = now;
+        self.stats.last_frame_seconds = dt;
+        // First frame: seed the EMA with the raw value so we don't display 0 fps.
+        // After that: alpha = dt / (tau + dt) gives a time-domain EMA whose
+        // response is independent of the actual frame rate.
+        if self.stats.smoothed_frame_seconds <= 0.0 {
+            self.stats.smoothed_frame_seconds = dt;
+        } else {
+            let alpha = dt / (FRAME_TIME_LOWPASS_TAU + dt);
+            self.stats.smoothed_frame_seconds =
+                self.stats.smoothed_frame_seconds + alpha * (dt - self.stats.smoothed_frame_seconds);
+        }
         self.stats.frame_index = self.stats.frame_index.wrapping_add(1);
 
         // Camera uniform.

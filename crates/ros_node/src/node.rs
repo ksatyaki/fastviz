@@ -7,8 +7,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use futures::executor::LocalPool;
+use futures::executor::{LocalPool, LocalSpawner};
+use futures::stream::StreamExt;
+use futures::task::LocalSpawnExt;
 use parking_lot::Mutex;
+use r2r::qos::DurabilityPolicy;
+use r2r::QosProfile;
 use scene::SceneHandle;
 
 use crate::config::RosConfig;
@@ -86,7 +90,7 @@ fn run(
     let tf_tree = Arc::new(TfTree::new());
     let tf_refresh = TfRegistry::new();
 
-    subscribers::tf::spawn(&mut node, &spawner, tf_tree.clone()).context("TF subscribers")?;
+    subscribers::tf::spawn(&mut node, &spawner, tf_tree.clone(), &cfg).context("TF subscribers")?;
     let mut registry = subscribers::discovery::bootstrap(
         &mut node,
         &spawner,
@@ -100,41 +104,37 @@ fn run(
 
     if let Some(urdf_path) = cfg.urdf_path.clone() {
         match UrdfModel::load(&urdf_path) {
-            Ok((model, entities)) => {
-                {
-                    let mut scene_w = scene.write();
-                    for entity in entities {
-                        scene_w.upsert(entity);
-                    }
-                }
-                let model = Arc::new(Mutex::new(model));
-                // Push transforms with all joints at zero so the robot is visible
-                // before the first JointState message arrives, and bind every
-                // link to the TF registry so late /tf hops repair its pose.
-                {
-                    let m = model.lock();
-                    subscribers::jointstate::push_link_transforms(
-                        &scene,
-                        &tf_tree,
-                        &cfg.reference_frame,
-                        &m,
-                    );
-                    subscribers::jointstate::register_link_transforms(&tf_refresh, &m);
-                }
-                subscribers::jointstate::spawn_topic(
-                    &mut node,
-                    &spawner,
-                    scene.clone(),
-                    tf_tree.clone(),
-                    tf_refresh.clone(),
-                    cfg.reference_frame.clone(),
-                    model,
-                    cfg.joint_states_topic.clone(),
-                    cfg.joint_states_qos.clone(),
-                )
-                .context("JointState subscriber")?;
-            }
+            Ok((model, entities)) => init_urdf(
+                &mut node,
+                &spawner,
+                &scene,
+                &tf_tree,
+                &tf_refresh,
+                &cfg,
+                model,
+                entities,
+            )
+            .context("init urdf from file")?,
             Err(e) => log::error!("urdf load failed: {e:#}"),
+        }
+    }
+    // URDF over topic: subscribe once, latch the first message into shared
+    // state, and let the main loop drain it (needs `&mut node` to spawn the
+    // JointState subscriber, which we don't have inside the async task).
+    let pending_urdf_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut urdf_topic_seen = cfg.urdf_path.is_some();
+    if !urdf_topic_seen {
+        if let Some(topic) = cfg.urdf_topic.clone() {
+            spawn_urdf_topic_subscriber(
+                &mut node,
+                &spawner,
+                pending_urdf_text.clone(),
+                topic,
+                cfg.urdf_topic_qos.clone(),
+            )
+            .context("URDF topic subscriber")?;
+        } else {
+            urdf_topic_seen = true; // nothing to wait for
         }
     }
 
@@ -155,6 +155,32 @@ fn run(
             node.spin_once(Duration::ZERO);
         }
         pool.run_until_stalled();
+
+        // Late URDF arrival (from the /robot_description-style topic): consume
+        // the first message, parse, spawn entities + JointState subscriber.
+        if !urdf_topic_seen {
+            let text = pending_urdf_text.lock().take();
+            if let Some(text) = text {
+                match UrdfModel::load_from_text(&text) {
+                    Ok((model, entities)) => {
+                        if let Err(e) = init_urdf(
+                            &mut node,
+                            &spawner,
+                            &scene,
+                            &tf_tree,
+                            &tf_refresh,
+                            &cfg,
+                            model,
+                            entities,
+                        ) {
+                            log::error!("urdf init (from topic) failed: {e:#}");
+                        }
+                    }
+                    Err(e) => log::error!("urdf parse (from topic) failed: {e:#}"),
+                }
+                urdf_topic_seen = true;
+            }
+        }
         // Re-evaluate world transforms for every TF-bound entity using the
         // current TF tree. This is what makes a late /tf message *retroactively*
         // fix a scan/cloud/URDF that was rendered with `IDENTITY` because TF
@@ -178,5 +204,93 @@ fn run(
     }
 
     log::info!("ros2 node shutting down");
+    Ok(())
+}
+
+/// Push a freshly-parsed URDF into the scene graph + register every link with
+/// the TF registry + spawn the JointState subscriber. Shared between the
+/// "load from file at startup" and "first message on the URDF topic" paths.
+#[allow(clippy::too_many_arguments)]
+fn init_urdf(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: &SceneHandle,
+    tf_tree: &Arc<TfTree>,
+    tf_refresh: &Arc<TfRegistry>,
+    cfg: &RosConfig,
+    model: UrdfModel,
+    entities: Vec<scene::SceneEntity>,
+) -> Result<()> {
+    {
+        let mut scene_w = scene.write();
+        for entity in entities {
+            scene_w.upsert(entity);
+        }
+    }
+    let model = Arc::new(Mutex::new(model));
+    // Push transforms with all joints at zero so the robot is visible before
+    // the first JointState message arrives, and bind every link to the TF
+    // registry so late /tf hops repair its pose.
+    {
+        let m = model.lock();
+        subscribers::jointstate::push_link_transforms(
+            scene,
+            tf_tree,
+            &cfg.reference_frame,
+            &m,
+        );
+        subscribers::jointstate::register_link_transforms(tf_refresh, &m);
+    }
+    subscribers::jointstate::spawn_topic(
+        node,
+        spawner,
+        scene.clone(),
+        tf_tree.clone(),
+        cfg.reference_frame.clone(),
+        model,
+        cfg.joint_states_topic.clone(),
+        cfg.joint_states_qos.clone(),
+    )
+    .context("JointState subscriber")?;
+    Ok(())
+}
+
+/// Subscribe to a `std_msgs/String` URDF topic (typically
+/// `/robot_description`, latched by `robot_state_publisher`). The first
+/// message is stored in `pending`; the main spin loop drains it and runs the
+/// real URDF init. Defaults to TRANSIENT_LOCAL QoS so latched publishers are
+/// picked up; can be overridden via `[urdf].topic_qos` in the TOML config.
+fn spawn_urdf_topic_subscriber(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    pending: Arc<Mutex<Option<String>>>,
+    topic: String,
+    qos_override: Option<crate::config::QosOverride>,
+) -> Result<()> {
+    let mut qos = QosProfile::default()
+        .keep_last(1)
+        .durability(DurabilityPolicy::TransientLocal);
+    if let Some(o) = &qos_override {
+        qos = o.apply(qos);
+    }
+    let mut sub = node
+        .subscribe::<r2r::std_msgs::msg::String>(&topic, qos)
+        .with_context(|| format!("subscribing to {topic}"))?;
+    log::info!("subscribed: {topic} (std_msgs/String — URDF)");
+    let topic_owned = topic;
+    spawner
+        .spawn_local(async move {
+            while let Some(msg) = sub.next().await {
+                let mut slot = pending.lock();
+                if slot.is_none() {
+                    log::info!(
+                        "{topic_owned}: received URDF ({} bytes)",
+                        msg.data.len()
+                    );
+                }
+                *slot = Some(msg.data);
+            }
+        })
+        .context("spawning URDF topic task")?;
     Ok(())
 }

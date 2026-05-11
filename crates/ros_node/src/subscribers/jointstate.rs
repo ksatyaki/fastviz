@@ -37,7 +37,6 @@ pub fn spawn_topic(
     spawner: &LocalSpawner,
     scene: SceneHandle,
     tf: Arc<TfTree>,
-    tf_refresh: Arc<TfRegistry>,
     reference_frame: String,
     model: Arc<Mutex<UrdfModel>>,
     topic: String,
@@ -69,10 +68,6 @@ pub fn spawn_topic(
                     let mut m = model.lock();
                     m.apply_joint_positions(msg.name.iter().map(String::as_str), &msg.position);
                     push_link_transforms(&scene, &tf, &reference_frame, &m);
-                    // Re-bind links so the registry can refresh world
-                    // transforms when /tf changes between joint-state messages
-                    // (or never publishes a new one).
-                    register_link_transforms(&tf_refresh, &m);
                 }
                 if first {
                     log::info!("{topic}: first message ({} joints)", msg.name.len());
@@ -84,15 +79,17 @@ pub fn spawn_topic(
     Ok(())
 }
 
-/// Register every URDF link with the TF registry so the main loop's refresh
-/// can recompute world transforms whenever the TF tree changes — even between
-/// JointState messages, or with no JointState messages at all (URDFs whose
-/// joints never move).
+/// Register every URDF link with the TF registry against its **own** TF frame
+/// (link name = TF frame name), with `local` set to the static visual offset.
+/// This mirrors the LaserScan/PointCloud2 pattern: when `robot_state_publisher`
+/// is running it publishes per-link transforms in `/tf`, so the registry's
+/// refresh pass picks up joint motion directly from TF without us re-running
+/// FK on every JointState message. URDFs without an RSP keep the FK-computed
+/// pose written by `push_link_transforms` (the registry leaves the prior
+/// transform alone when the lookup fails — see `TfRegistry::refresh`).
 pub fn register_link_transforms(tf_refresh: &TfRegistry, model: &UrdfModel) {
     for link in &model.links {
-        // `local` is the visual pose expressed in the URDF root link's ROS
-        // frame; the registry composes it with `ROS_TO_WORLD * ref_T_root`.
-        tf_refresh.register(link.entity_id, model.root_link.clone(), model.visual_in_root(link));
+        tf_refresh.register(link.entity_id, link.name.clone(), link.visual_origin);
     }
 }
 
