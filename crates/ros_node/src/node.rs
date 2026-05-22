@@ -1,6 +1,7 @@
 //! Node lifecycle: spawn a dedicated thread for the r2r executor and shut it
 //! down cleanly when the app exits.
 
+use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -10,7 +11,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use futures::executor::{LocalPool, LocalSpawner};
 use futures::stream::StreamExt;
 use futures::task::LocalSpawnExt;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use r2r::qos::DurabilityPolicy;
 use r2r::QosProfile;
 use scene::SceneHandle;
@@ -19,14 +20,24 @@ use crate::config::RosConfig;
 use crate::stats::RosStats;
 use crate::subscribers;
 use crate::tf::TfTree;
-use crate::tf_axes::TfAxesRegistry;
+use crate::tf_axes::{TfAxesRegistry, DEFAULT_AXIS_LENGTH_M};
 use crate::tf_refresh::TfRegistry;
 use crate::urdf::UrdfModel;
+
+/// Snapshot of every topic currently visible on the ROS graph, refreshed by
+/// the executor thread. Each entry is `(topic, [msg_type, ...])`.
+pub type TopicsSnapshot = Arc<RwLock<Vec<(String, Vec<String>)>>>;
 
 pub struct RosNode {
     handle: Option<thread::JoinHandle<()>>,
     shutdown: Sender<()>,
     stats: Arc<RosStats>,
+    /// Shared TF axis length (meters) — UI mutates, executor thread reads.
+    /// Stored as `f32::to_bits` in an atomic.
+    tf_axis_length: Arc<AtomicU32>,
+    /// Latest topic-graph snapshot, refreshed roughly once per second by the
+    /// executor. Used by the UI's topic discoverer.
+    topics: TopicsSnapshot,
 }
 
 impl RosNode {
@@ -34,10 +45,22 @@ impl RosNode {
         let (tx, rx) = bounded::<()>(1);
         let stats = Arc::new(RosStats::default());
         let stats_thread = stats.clone();
+        let tf_axis_length =
+            Arc::new(AtomicU32::new(DEFAULT_AXIS_LENGTH_M.to_bits()));
+        let tf_axis_length_thread = tf_axis_length.clone();
+        let topics: TopicsSnapshot = Arc::new(RwLock::new(Vec::new()));
+        let topics_thread = topics.clone();
         let handle = thread::Builder::new()
             .name("ros2-executor".into())
             .spawn(move || {
-                if let Err(e) = run(scene, cfg, rx, stats_thread) {
+                if let Err(e) = run(
+                    scene,
+                    cfg,
+                    rx,
+                    stats_thread,
+                    tf_axis_length_thread,
+                    topics_thread,
+                ) {
                     log::error!("ros2 executor exited with error: {e:#}");
                 }
             })
@@ -46,12 +69,26 @@ impl RosNode {
             handle: Some(handle),
             shutdown: tx,
             stats,
+            tf_axis_length,
+            topics,
         })
     }
 
     /// Cross-thread counters (e.g. PC2 messages received). Cheap atomic loads.
     pub fn stats(&self) -> &Arc<RosStats> {
         &self.stats
+    }
+
+    /// Shared handle to the live TF axis length (meters). Stored as
+    /// `f32::to_bits` in an atomic; use `f32::from_bits` / `f32::to_bits`
+    /// when reading or writing.
+    pub fn tf_axis_length_handle(&self) -> &Arc<AtomicU32> {
+        &self.tf_axis_length
+    }
+
+    /// Latest topic-graph snapshot from the executor thread.
+    pub fn topics(&self) -> &TopicsSnapshot {
+        &self.topics
     }
 
     pub fn shutdown(mut self) {
@@ -76,6 +113,8 @@ fn run(
     cfg: RosConfig,
     shutdown: Receiver<()>,
     stats: Arc<RosStats>,
+    tf_axis_length: Arc<AtomicU32>,
+    topics: TopicsSnapshot,
 ) -> Result<()> {
     let ctx = r2r::Context::create().context("r2r::Context::create")?;
     let mut node =
@@ -90,7 +129,7 @@ fn run(
     let spawner = pool.spawner();
     let tf_tree = Arc::new(TfTree::new());
     let tf_refresh = TfRegistry::new();
-    let tf_axes = TfAxesRegistry::new();
+    let tf_axes = TfAxesRegistry::with_scale(tf_axis_length);
 
     subscribers::tf::spawn(&mut node, &spawner, tf_tree.clone(), &cfg).context("TF subscribers")?;
     let mut registry = subscribers::discovery::bootstrap(
@@ -204,6 +243,18 @@ fn run(
                 &stats,
             ) {
                 log::warn!("discovery tick failed: {e:#}");
+            }
+            // Refresh the shared topic-graph snapshot for the UI's topic
+            // discoverer. Cheap (single rcl call) and runs unconditionally —
+            // wildcard config is no longer the only consumer.
+            match node.get_topic_names_and_types() {
+                Ok(snapshot) => {
+                    let mut list: Vec<(String, Vec<String>)> =
+                        snapshot.into_iter().collect();
+                    list.sort_by(|a, b| a.0.cmp(&b.0));
+                    *topics.write() = list;
+                }
+                Err(e) => log::warn!("topic snapshot failed: {e}"),
             }
         }
     }

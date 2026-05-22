@@ -1,5 +1,7 @@
 //! Egui panel layout: top toolbar + left entity list.
 
+use std::collections::HashSet;
+
 use egui::{Align, Layout};
 use renderer::{FrameStats, OrbitCamera};
 use scene::{EntityId, ScenePrimitive, SceneGraph};
@@ -53,6 +55,26 @@ impl UiGroupView {
     }
 }
 
+/// Persistent state for the floating "Topics" window. Owned by the app so the
+/// user's selection survives across frames.
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+#[derive(Default)]
+pub struct TopicDiscovererState {
+    pub open: bool,
+    pub filename: String,
+    pub selected: HashSet<String>,
+    /// One-line status message rendered under the save button.
+    pub status: Option<String>,
+}
+
+/// Inputs the topic discoverer needs from outside.
+#[cfg(feature = "ros")]
+#[derive(Copy, Clone)]
+pub struct TopicDiscovererCtx<'a> {
+    pub topics: &'a ros_node::TopicsSnapshot,
+    pub reference_frame: &'a str,
+}
+
 pub fn draw(
     ctx: &egui::Context,
     scene: &mut SceneGraph,
@@ -61,6 +83,9 @@ pub fn draw(
     show_reference_grid: &mut bool,
     pc2: Pc2Stats,
     groups: &mut [UiGroupView],
+    tf_axis_length: &mut f32,
+    discoverer: &mut TopicDiscovererState,
+    #[cfg(feature = "ros")] topic_ctx: Option<TopicDiscovererCtx<'_>>,
 ) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
@@ -77,6 +102,27 @@ pub fn draw(
             }
             ui.separator();
             ui.checkbox(show_reference_grid, "ref grid");
+            ui.separator();
+            ui.label("TF size");
+            ui.add(
+                egui::DragValue::new(tf_axis_length)
+                    .speed(0.02)
+                    .range(0.01..=20.0)
+                    .suffix(" m")
+                    .max_decimals(3),
+            )
+            .on_hover_text("Length of every TF-frame axis arm in meters. Proportions are fixed; only the overall size scales.");
+            #[cfg(feature = "ros")]
+            {
+                ui.separator();
+                if ui.button("Topics…").clicked() {
+                    discoverer.open = !discoverer.open;
+                }
+            }
+            #[cfg(not(feature = "ros"))]
+            {
+                let _ = &discoverer;
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Use the smoothed frame time so the readout doesn't flicker.
                 // Raw `last_frame_seconds` is still on FrameStats for callers
@@ -153,6 +199,139 @@ pub fn draw(
                 }
             }
         });
+
+    #[cfg(feature = "ros")]
+    if let Some(tctx) = topic_ctx {
+        draw_topic_discoverer(ctx, discoverer, tctx);
+    }
+}
+
+#[cfg(feature = "ros")]
+fn draw_topic_discoverer(
+    ctx: &egui::Context,
+    state: &mut TopicDiscovererState,
+    tctx: TopicDiscovererCtx<'_>,
+) {
+    let mut open = state.open;
+    egui::Window::new("Topic discoverer")
+        .resizable(true)
+        .default_width(420.0)
+        .default_height(360.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let snapshot: Vec<(String, Vec<String>)> = tctx.topics.read().clone();
+            ui.label(format!(
+                "Discovered {} topic(s) on the ROS graph.",
+                snapshot.len()
+            ));
+            ui.label(
+                "Tick the ones you want to visualise, then save a config file. \
+                 Topic types fastviz doesn't understand are listed but skipped on save.",
+            );
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Select all supported").clicked() {
+                    for (t, types) in &snapshot {
+                        if ros_node::TopicKind::from_types(types).is_some() {
+                            state.selected.insert(t.clone());
+                        }
+                    }
+                }
+                if ui.button("Clear").clicked() {
+                    state.selected.clear();
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(220.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("topic_grid")
+                        .striped(true)
+                        .num_columns(3)
+                        .spacing([8.0, 2.0])
+                        .show(ui, |ui| {
+                            for (topic, types) in &snapshot {
+                                let kind = ros_node::TopicKind::from_types(types);
+                                let supported = kind.is_some();
+                                let mut checked = state.selected.contains(topic);
+                                let resp = ui.add_enabled(
+                                    supported,
+                                    egui::Checkbox::new(&mut checked, ""),
+                                );
+                                if resp.changed() {
+                                    if checked {
+                                        state.selected.insert(topic.clone());
+                                    } else {
+                                        state.selected.remove(topic);
+                                    }
+                                }
+                                ui.label(topic);
+                                let kind_str = match kind {
+                                    Some(k) => k.label().to_string(),
+                                    None => {
+                                        let head =
+                                            types.first().cloned().unwrap_or_default();
+                                        format!("{head} (unsupported)")
+                                    }
+                                };
+                                ui.label(kind_str);
+                                ui.end_row();
+                            }
+                        });
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Save as:");
+                if state.filename.is_empty() {
+                    state.filename = "configs/discovered.toml".to_string();
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.filename)
+                        .desired_width(260.0)
+                        .hint_text("configs/discovered.toml"),
+                );
+                let save_clicked = ui.button("Save to TOML").clicked();
+                if save_clicked {
+                    let selected: Vec<String> =
+                        state.selected.iter().cloned().collect();
+                    let toml = ros_node::config_to_toml(
+                        &snapshot,
+                        &selected,
+                        tctx.reference_frame,
+                    );
+                    let path = std::path::PathBuf::from(state.filename.trim());
+                    if let Some(parent) = path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                    }
+                    match std::fs::write(&path, toml) {
+                        Ok(()) => {
+                            state.status = Some(format!(
+                                "saved {} topic(s) to {}",
+                                selected.len(),
+                                path.display()
+                            ));
+                            log::info!(
+                                "wrote {} topic selection(s) to {}",
+                                selected.len(),
+                                path.display()
+                            );
+                        }
+                        Err(e) => {
+                            state.status =
+                                Some(format!("save failed: {e}"));
+                            log::error!("topic discoverer save failed: {e}");
+                        }
+                    }
+                }
+            });
+            if let Some(msg) = &state.status {
+                ui.label(msg);
+            }
+        });
+    state.open = open;
 }
 
 fn draw_group(

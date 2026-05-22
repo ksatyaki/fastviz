@@ -51,6 +51,16 @@ struct AppContext {
     ros: Option<ros_node::RosNode>,
     /// Side-panel grouping config. Empty = flat list.
     ui_groups: Vec<ui::UiGroupView>,
+    /// Current TF axis length in meters (UI-driven). Mirrored into the ROS
+    /// node's shared atomic each frame so the executor thread picks it up.
+    tf_axis_length: f32,
+    /// Reference frame the topic discoverer writes into newly-generated TOML.
+    /// Cloned from the loaded `RosConfig` at startup so the value survives
+    /// without holding a borrow on the ROS node.
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    reference_frame: String,
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    discoverer: ui::TopicDiscovererState,
     input: InputState,
     show_reference_grid: bool,
     /// PC2 messages we've witnessed in `RosStats` so far. Compared to the
@@ -156,7 +166,7 @@ impl ApplicationHandler for App {
         };
 
         #[cfg(feature = "ros")]
-        let (ros, ui_groups) = {
+        let (ros, ui_groups, reference_frame) = {
             let mut cfg = match self.args.config.as_deref() {
                 Some(p) => match ros_node::RosConfig::from_path(p) {
                     Ok(c) => {
@@ -179,6 +189,7 @@ impl ApplicationHandler for App {
                 cfg.urdf_path = Some(p.clone());
             }
             let groups = ui::UiGroupView::from_config(&cfg.ui_groups);
+            let reference_frame = cfg.reference_frame.clone();
             let n = match ros_node::RosNode::spawn(scene.clone(), cfg) {
                 Ok(n) => Some(n),
                 Err(e) => {
@@ -186,12 +197,30 @@ impl ApplicationHandler for App {
                     None
                 }
             };
-            (n, groups)
+            (n, groups, reference_frame)
         };
         #[cfg(not(feature = "ros"))]
         let ui_groups: Vec<ui::UiGroupView> = Vec::new();
+        #[cfg(not(feature = "ros"))]
+        let reference_frame: String = self.args.ref_frame.clone();
 
         window.request_redraw();
+
+        #[cfg(feature = "ros")]
+        let initial_tf_scale = ros
+            .as_ref()
+            .map(|n| {
+                f32::from_bits(
+                    n.tf_axis_length_handle()
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .unwrap_or(0.3);
+        #[cfg(not(feature = "ros"))]
+        let initial_tf_scale = 0.3;
+
+        let mut discoverer = ui::TopicDiscovererState::default();
+        discoverer.filename = "configs/discovered.toml".to_string();
 
         self.ctx = Some(AppContext {
             window,
@@ -202,6 +231,9 @@ impl ApplicationHandler for App {
             #[cfg(feature = "ros")]
             ros,
             ui_groups,
+            tf_axis_length: initial_tf_scale,
+            reference_frame,
+            discoverer,
             input: InputState::default(),
             show_reference_grid: true,
             pc2_last_seen_received: 0,
@@ -359,12 +391,19 @@ impl AppContext {
         }
 
         // 1. Run the UI logic (button clicks etc. mutate camera + scene now).
+        #[cfg(feature = "ros")]
+        let topic_ctx = self.ros.as_ref().map(|n| ui::TopicDiscovererCtx {
+            topics: n.topics(),
+            reference_frame: self.reference_frame.as_str(),
+        });
         let full_output = {
             let window = self.window.clone();
             let scene = self.scene.clone();
             let camera = &mut self.renderer.camera;
             let show_grid = &mut self.show_reference_grid;
             let groups = &mut self.ui_groups;
+            let tf_len = &mut self.tf_axis_length;
+            let discoverer = &mut self.discoverer;
             self.egui.run_ui(&window, |egui_ctx| {
                 let mut scene = scene.write();
                 ui::draw(
@@ -375,9 +414,22 @@ impl AppContext {
                     show_grid,
                     pc2_stats,
                     groups,
+                    tf_len,
+                    discoverer,
+                    #[cfg(feature = "ros")]
+                    topic_ctx,
                 );
             })
         };
+
+        // Mirror UI-driven TF scale into the ROS executor's shared atomic.
+        #[cfg(feature = "ros")]
+        if let Some(n) = self.ros.as_ref() {
+            n.tf_axis_length_handle().store(
+                self.tf_axis_length.to_bits(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
 
         // 2. Apply UI-mutated state to the renderer.
         self.renderer.reference_grid.visible = self.show_reference_grid;

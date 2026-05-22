@@ -11,6 +11,7 @@
 //! hidden as long as the entity lives.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use glam::Mat4;
@@ -21,13 +22,15 @@ use crate::coords::ROS_TO_WORLD;
 use crate::ids::TF_FRAME_BASE;
 use crate::tf::TfTree;
 
-/// Default axis arm length (meters, ROS scale). Small enough not to overpower
-/// the rest of the scene; visible at typical indoor zoom levels.
-const DEFAULT_AXIS_LENGTH_M: f32 = 0.2;
+/// Default axis arm length (meters, ROS scale). Visible at typical indoor zoom
+/// levels; the UI can scale this up at runtime via the shared scale handle.
+pub const DEFAULT_AXIS_LENGTH_M: f32 = 0.3;
 
 pub struct TfAxesRegistry {
     inner: Mutex<Inner>,
-    axis_length: f32,
+    /// Shared, runtime-mutable axis length (meters). Stored as `f32::to_bits`
+    /// in an `AtomicU32` so the UI thread can update it lock-free.
+    axis_length: Arc<AtomicU32>,
 }
 
 #[derive(Default)]
@@ -36,14 +39,32 @@ struct Inner {
     /// across ticks so toggle state and revisions remain coherent.
     ids: HashMap<String, EntityId>,
     next_offset: u64,
+    /// `axis_length` value applied on the previous refresh — used to decide
+    /// when we need to rewrite the Frame primitive (vs. only its transform).
+    last_applied: f32,
 }
 
 impl TfAxesRegistry {
     pub fn new() -> Arc<Self> {
+        Self::with_scale(Arc::new(AtomicU32::new(
+            DEFAULT_AXIS_LENGTH_M.to_bits(),
+        )))
+    }
+
+    pub fn with_scale(axis_length: Arc<AtomicU32>) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner::default()),
-            axis_length: DEFAULT_AXIS_LENGTH_M,
+            axis_length,
         })
+    }
+
+    /// Shared handle to the axis length so the UI thread can mutate it.
+    pub fn axis_length_handle(&self) -> Arc<AtomicU32> {
+        self.axis_length.clone()
+    }
+
+    fn current_length(&self) -> f32 {
+        f32::from_bits(self.axis_length.load(Ordering::Relaxed)).max(1e-4)
     }
 
     /// Walk the current TF tree and materialise one Frame entity per frame.
@@ -67,7 +88,12 @@ impl TfAxesRegistry {
             set.into_iter().collect()
         };
 
+        let axis_length = self.current_length();
         let mut inner = self.inner.lock();
+        // When the user changes the scale, every existing Frame's primitive
+        // needs to be rewritten so the line pass picks up the new length.
+        let scale_changed = (inner.last_applied - axis_length).abs() > 1e-6;
+        inner.last_applied = axis_length;
         let mut scene_w = scene.write();
         for name in names {
             let world = if name == reference_frame {
@@ -91,6 +117,16 @@ impl TfAxesRegistry {
 
             if !is_new && scene_w.entities.contains_key(&id) {
                 scene_w.update_transform(id, world);
+                if scale_changed {
+                    scene_w.update_primitive(
+                        id,
+                        ScenePrimitive::Frame(Frame {
+                            transform: Mat4::IDENTITY,
+                            axis_length,
+                            label: Some(name.clone()),
+                        }),
+                    );
+                }
                 continue;
             }
 
@@ -98,7 +134,7 @@ impl TfAxesRegistry {
                 id,
                 ScenePrimitive::Frame(Frame {
                     transform: Mat4::IDENTITY,
-                    axis_length: self.axis_length,
+                    axis_length,
                     label: Some(name.clone()),
                 }),
             );
@@ -196,5 +232,26 @@ mod tests {
         let count_after_first = scene.read().entities.len();
         reg.refresh(&tf, "map", &scene);
         assert_eq!(scene.read().entities.len(), count_after_first);
+    }
+
+    #[test]
+    fn updating_scale_rewrites_frame_axis_length() {
+        let scene: SceneHandle = Arc::new(RwLock::new(SceneGraph::new("map")));
+        let tf = TfTree::new();
+        {
+            let mut f = tf.frames.write();
+            f.insert("odom".into(), translation_entry("map", Vec3::new(1.0, 0.0, 0.0)));
+        }
+        let reg = TfAxesRegistry::new();
+        reg.refresh(&tf, "map", &scene);
+        let handle = reg.axis_length_handle();
+        handle.store(1.5_f32.to_bits(), Ordering::Relaxed);
+        reg.refresh(&tf, "map", &scene);
+        let s = scene.read();
+        for e in s.entities.values() {
+            if let ScenePrimitive::Frame(f) = &e.primitive {
+                assert!((f.axis_length - 1.5).abs() < 1e-5);
+            }
+        }
     }
 }
