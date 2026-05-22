@@ -24,6 +24,8 @@ pub struct RosConfig {
     pub namespace: String,
     /// Frame all incoming data is transformed into before insertion.
     pub reference_frame: String,
+    /// Initial TF axis-arm length (meters). UI can mutate at runtime.
+    pub tf_axis_length: Option<f32>,
     pub map_topic: String,
     /// Topics carrying `geometry_msgs/PoseStamped`. Each gets one Arrow entity.
     pub pose_topics: Vec<String>,
@@ -203,6 +205,7 @@ impl Default for RosConfig {
             node_name: "fastviz".into(),
             namespace: String::new(),
             reference_frame: "map".into(),
+            tf_axis_length: None,
             map_topic: "/map".into(),
             pose_topics: vec!["/goal_pose".into()],
             pose_array_topics: vec!["/particle_cloud".into()],
@@ -316,6 +319,8 @@ pub struct RawTf {
     pub static_topic: Option<String>,
     pub qos: Option<QosOverride>,
     pub static_qos: Option<QosOverride>,
+    /// Initial axis-arm length in meters; the UI can override at runtime.
+    pub axis_length: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -490,14 +495,21 @@ impl RawConfig {
                 ),
             };
 
-        let (tf_topic, tf_static_topic, tf_qos, tf_static_qos) = match tf {
+        let (tf_topic, tf_static_topic, tf_qos, tf_static_qos, tf_axis_length) = match tf {
             Some(t) => (
                 t.topic.unwrap_or(d.tf_topic),
                 t.static_topic.unwrap_or(d.tf_static_topic),
                 t.qos,
                 t.static_qos,
+                t.axis_length,
             ),
-            None => (d.tf_topic, d.tf_static_topic, d.tf_qos, d.tf_static_qos),
+            None => (
+                d.tf_topic,
+                d.tf_static_topic,
+                d.tf_qos,
+                d.tf_static_qos,
+                d.tf_axis_length,
+            ),
         };
 
         let ui_groups = ui
@@ -519,6 +531,7 @@ impl RawConfig {
             node_name: node_name.unwrap_or(d.node_name),
             namespace: namespace.unwrap_or(d.namespace),
             reference_frame: reference_frame.unwrap_or(d.reference_frame),
+            tf_axis_length,
             map_topic,
             pose_topics,
             pose_array_topics,

@@ -61,6 +61,13 @@ struct AppContext {
     reference_frame: String,
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
     discoverer: ui::TopicDiscovererState,
+    /// Per-entity color/scale text-edit buffers. Lives outside egui memory so
+    /// it survives across panel rebuilds without keying on internal egui ids.
+    edit_state: ui::EntityEditState,
+    /// Concrete topic list (one entry per subscribed topic) used to pre-check
+    /// rows in the Save-config window. Built once from the loaded RosConfig.
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    active_topics: Vec<String>,
     input: InputState,
     show_reference_grid: bool,
     /// PC2 messages we've witnessed in `RosStats` so far. Compared to the
@@ -166,7 +173,7 @@ impl ApplicationHandler for App {
         };
 
         #[cfg(feature = "ros")]
-        let (ros, ui_groups, reference_frame) = {
+        let (ros, ui_groups, reference_frame, active_topics, cfg_tf_axis_length) = {
             let mut cfg = match self.args.config.as_deref() {
                 Some(p) => match ros_node::RosConfig::from_path(p) {
                     Ok(c) => {
@@ -190,6 +197,25 @@ impl ApplicationHandler for App {
             }
             let groups = ui::UiGroupView::from_config(&cfg.ui_groups);
             let reference_frame = cfg.reference_frame.clone();
+            // Snapshot every concrete topic the node will subscribe to so the
+            // Save-config window can pre-check them. Wildcards ("*") are skipped
+            // since they don't name a real topic.
+            let mut active: Vec<String> = Vec::new();
+            if cfg.map_topic != "*" {
+                active.push(cfg.map_topic.clone());
+            }
+            for v in [
+                &cfg.pose_topics,
+                &cfg.pose_array_topics,
+                &cfg.path_topics,
+                &cfg.scan_topics,
+                &cfg.point_topics,
+            ] {
+                for t in v.iter().filter(|t| t.as_str() != "*") {
+                    active.push(t.clone());
+                }
+            }
+            let tf_axis_len = cfg.tf_axis_length;
             let n = match ros_node::RosNode::spawn(scene.clone(), cfg) {
                 Ok(n) => Some(n),
                 Err(e) => {
@@ -197,25 +223,36 @@ impl ApplicationHandler for App {
                     None
                 }
             };
-            (n, groups, reference_frame)
+            (n, groups, reference_frame, active, tf_axis_len)
         };
         #[cfg(not(feature = "ros"))]
         let ui_groups: Vec<ui::UiGroupView> = Vec::new();
         #[cfg(not(feature = "ros"))]
         let reference_frame: String = self.args.ref_frame.clone();
+        #[cfg(not(feature = "ros"))]
+        let active_topics: Vec<String> = Vec::new();
 
         window.request_redraw();
 
         #[cfg(feature = "ros")]
-        let initial_tf_scale = ros
-            .as_ref()
-            .map(|n| {
-                f32::from_bits(
+        let initial_tf_scale = {
+            // If the config file pinned [tf].axis_length, push it into the
+            // shared atomic so the executor and the UI start in sync.
+            if let (Some(v), Some(n)) = (cfg_tf_axis_length, ros.as_ref()) {
+                if v > 0.0 {
                     n.tf_axis_length_handle()
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                )
-            })
-            .unwrap_or(0.3);
+                        .store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            ros.as_ref()
+                .map(|n| {
+                    f32::from_bits(
+                        n.tf_axis_length_handle()
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    )
+                })
+                .unwrap_or(0.3)
+        };
         #[cfg(not(feature = "ros"))]
         let initial_tf_scale = 0.3;
 
@@ -234,6 +271,8 @@ impl ApplicationHandler for App {
             tf_axis_length: initial_tf_scale,
             reference_frame,
             discoverer,
+            edit_state: ui::EntityEditState::default(),
+            active_topics,
             input: InputState::default(),
             show_reference_grid: true,
             pc2_last_seen_received: 0,
@@ -395,6 +434,7 @@ impl AppContext {
         let topic_ctx = self.ros.as_ref().map(|n| ui::TopicDiscovererCtx {
             topics: n.topics(),
             reference_frame: self.reference_frame.as_str(),
+            active_topics: self.active_topics.as_slice(),
         });
         let full_output = {
             let window = self.window.clone();
@@ -404,6 +444,7 @@ impl AppContext {
             let groups = &mut self.ui_groups;
             let tf_len = &mut self.tf_axis_length;
             let discoverer = &mut self.discoverer;
+            let edit_state = &mut self.edit_state;
             self.egui.run_ui(&window, |egui_ctx| {
                 let mut scene = scene.write();
                 ui::draw(
@@ -416,6 +457,7 @@ impl AppContext {
                     groups,
                     tf_len,
                     discoverer,
+                    edit_state,
                     #[cfg(feature = "ros")]
                     topic_ctx,
                 );

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use glam::Mat4;
 use parking_lot::RwLock;
 
+use crate::color::Color;
 use crate::primitives::{Arrow, Frame, Grid, Label, Mesh, Point, Polyline};
 
 /// Stable identifier for a scene entity. Owned by the ingestion-layer caller
@@ -67,10 +68,23 @@ impl SceneEntity {
     }
 }
 
+/// Per-entity UI-driven style override. Survives subscriber re-publishes so a
+/// user's color/scale edit isn't clobbered the next time a sensor message
+/// arrives — `SceneGraph::upsert` re-applies any stored override after the
+/// fresh primitive is inserted.
+#[derive(Copy, Clone, Debug, Default)]
+pub struct StyleOverride {
+    pub color: Option<Color>,
+    pub scale: Option<f32>,
+}
+
 #[derive(Debug)]
 pub struct SceneGraph {
     pub entities: HashMap<EntityId, SceneEntity>,
     pub reference_frame: String,
+    /// Per-entity style overrides applied on top of subscriber-published
+    /// primitives. Indexed by `EntityId`; missing entry = no override.
+    pub style_overrides: HashMap<EntityId, StyleOverride>,
     /// Monotonic counter bumped on every mutation. Render passes cache their
     /// last-seen value so they can skip rebuild + upload when the scene is
     /// unchanged (i.e. the renderer is redrawing faster than producers are
@@ -89,6 +103,7 @@ impl SceneGraph {
         SceneGraph {
             entities: HashMap::new(),
             reference_frame: reference_frame.into(),
+            style_overrides: HashMap::new(),
             revision: 0,
         }
     }
@@ -109,6 +124,9 @@ impl SceneGraph {
             // (e.g. MeshPass) can detect "this is new payload data".
             entity.revision = existing.revision.wrapping_add(1);
         }
+        if let Some(ov) = self.style_overrides.get(&entity.id).copied() {
+            apply_override(&mut entity.primitive, ov);
+        }
         self.entities.insert(entity.id, entity);
         self.revision += 1;
     }
@@ -117,10 +135,50 @@ impl SceneGraph {
     pub fn update_primitive(&mut self, id: EntityId, primitive: ScenePrimitive) {
         if let Some(e) = self.entities.get_mut(&id) {
             e.primitive = primitive;
+            if let Some(ov) = self.style_overrides.get(&id).copied() {
+                apply_override(&mut e.primitive, ov);
+            }
             e.dirty = true;
             e.revision = e.revision.wrapping_add(1);
             self.revision += 1;
         }
+    }
+
+    /// Set (or clear) the per-entity color override. Re-applies to the live
+    /// entity so the change is visible on the next render.
+    pub fn set_color_override(&mut self, id: EntityId, color: Option<Color>) {
+        let ov = self.style_overrides.entry(id).or_default();
+        ov.color = color;
+        if ov.color.is_none() && ov.scale.is_none() {
+            self.style_overrides.remove(&id);
+        }
+        if let Some(e) = self.entities.get_mut(&id) {
+            if let Some(c) = color {
+                apply_color(&mut e.primitive, c);
+            }
+            e.dirty = true;
+            e.revision = e.revision.wrapping_add(1);
+        }
+        self.revision += 1;
+    }
+
+    /// Set (or clear) the per-entity scale override. Semantics depend on the
+    /// primitive: point size, polyline width, arrow length (proportional),
+    /// label scale. Frames/grids/meshes ignore it.
+    pub fn set_scale_override(&mut self, id: EntityId, scale: Option<f32>) {
+        let ov = self.style_overrides.entry(id).or_default();
+        ov.scale = scale;
+        if ov.color.is_none() && ov.scale.is_none() {
+            self.style_overrides.remove(&id);
+        }
+        if let Some(e) = self.entities.get_mut(&id) {
+            if let Some(s) = scale {
+                apply_scale(&mut e.primitive, s);
+            }
+            e.dirty = true;
+            e.revision = e.revision.wrapping_add(1);
+        }
+        self.revision += 1;
     }
 
     /// Update the transform. Bumps revision so the renderer picks up the new
@@ -146,6 +204,114 @@ impl SceneGraph {
             self.revision += 1;
         }
         removed
+    }
+}
+
+fn apply_override(p: &mut ScenePrimitive, ov: StyleOverride) {
+    if let Some(c) = ov.color {
+        apply_color(p, c);
+    }
+    if let Some(s) = ov.scale {
+        apply_scale(p, s);
+    }
+}
+
+/// Apply a single RGB color to every part of `p` that has one. No-op for
+/// primitives without a single canonical color (Frame, Grid::Cells).
+pub fn apply_color(p: &mut ScenePrimitive, c: Color) {
+    match p {
+        ScenePrimitive::Points(pts) => {
+            for pt in pts.iter_mut() {
+                pt.color = c;
+            }
+        }
+        ScenePrimitive::Polyline(pl) => pl.color = c,
+        ScenePrimitive::Arrows(arrs) => {
+            for a in arrs.iter_mut() {
+                a.color = c;
+            }
+        }
+        ScenePrimitive::Mesh(m) => m.material.base_color = c,
+        ScenePrimitive::Labels(ls) => {
+            for l in ls.iter_mut() {
+                l.color = c;
+            }
+        }
+        ScenePrimitive::Grid(g) => {
+            if let crate::primitives::GridData::Uniform(_) = g.data {
+                g.data = crate::primitives::GridData::Uniform(c);
+            }
+        }
+        ScenePrimitive::Frame(_) => {
+            // R/G/B axes are intentional; per-frame color isn't user-editable.
+        }
+    }
+}
+
+/// Apply a "scale" override. Per-primitive semantics:
+/// - Points: per-point size
+/// - Polyline: width
+/// - Arrows: proportional scaling of length / shaft / head
+/// - Frame: axis_length (only honored when no global TF size is in effect)
+/// - Labels: scale
+/// - Mesh / Grid: no-op
+pub fn apply_scale(p: &mut ScenePrimitive, s: f32) {
+    let s = s.max(1e-4);
+    match p {
+        ScenePrimitive::Points(pts) => {
+            for pt in pts.iter_mut() {
+                pt.size = s;
+            }
+        }
+        ScenePrimitive::Polyline(pl) => pl.width = s,
+        ScenePrimitive::Arrows(arrs) => {
+            for a in arrs.iter_mut() {
+                // Scale length and radii proportionally relative to current length.
+                if a.length > 1e-6 {
+                    let k = s / a.length;
+                    a.length = s;
+                    a.shaft_radius *= k;
+                    a.head_radius *= k;
+                } else {
+                    a.length = s;
+                }
+            }
+        }
+        ScenePrimitive::Frame(f) => f.axis_length = s,
+        ScenePrimitive::Labels(ls) => {
+            for l in ls.iter_mut() {
+                l.scale = s;
+            }
+        }
+        ScenePrimitive::Mesh(_) | ScenePrimitive::Grid(_) => {}
+    }
+}
+
+/// Read the canonical single color from a primitive, if it has one.
+pub fn primitive_color(p: &ScenePrimitive) -> Option<Color> {
+    match p {
+        ScenePrimitive::Points(pts) => pts.first().map(|pt| pt.color),
+        ScenePrimitive::Polyline(pl) => Some(pl.color),
+        ScenePrimitive::Arrows(arrs) => arrs.first().map(|a| a.color),
+        ScenePrimitive::Mesh(m) => Some(m.material.base_color),
+        ScenePrimitive::Labels(ls) => ls.first().map(|l| l.color),
+        ScenePrimitive::Grid(g) => match g.data {
+            crate::primitives::GridData::Uniform(c) => Some(c),
+            crate::primitives::GridData::Cells(..) => None,
+        },
+        ScenePrimitive::Frame(_) => None,
+    }
+}
+
+/// Read the canonical "scale" from a primitive, if one applies.
+pub fn primitive_scale(p: &ScenePrimitive) -> Option<f32> {
+    match p {
+        ScenePrimitive::Points(pts) => pts.first().map(|pt| pt.size),
+        ScenePrimitive::Polyline(pl) => Some(pl.width),
+        ScenePrimitive::Arrows(arrs) => arrs.first().map(|a| a.length),
+        ScenePrimitive::Frame(f) => Some(f.axis_length),
+        ScenePrimitive::Labels(ls) => ls.first().map(|l| l.scale),
+        ScenePrimitive::Mesh(_) | ScenePrimitive::Grid(_) => None,
     }
 }
 
@@ -253,6 +419,73 @@ mod tests {
         let rev1 = g.entities[&EntityId(11)].revision;
         g.upsert(SceneEntity::new(EntityId(11), ScenePrimitive::Points(vec![])));
         assert!(g.entities[&EntityId(11)].revision > rev1, "re-upsert should bump");
+    }
+
+    #[test]
+    fn color_override_survives_republish() {
+        let mut g = SceneGraph::default();
+        g.upsert(SceneEntity::new(
+            EntityId(50),
+            ScenePrimitive::Points(vec![Point {
+                position: Vec3::ZERO,
+                color: Color::WHITE,
+                size: 1.0,
+            }]),
+        ));
+        g.set_color_override(EntityId(50), Some(Color::RED));
+        // Subscriber pushes a fresh primitive with the old style color.
+        g.upsert(SceneEntity::new(
+            EntityId(50),
+            ScenePrimitive::Points(vec![Point {
+                position: Vec3::X,
+                color: Color::GREEN,
+                size: 2.0,
+            }]),
+        ));
+        let pts = match &g.entities[&EntityId(50)].primitive {
+            ScenePrimitive::Points(p) => p.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(pts.first().unwrap().color, Color::RED);
+    }
+
+    #[test]
+    fn scale_override_survives_republish() {
+        let mut g = SceneGraph::default();
+        g.upsert(SceneEntity::new(
+            EntityId(51),
+            ScenePrimitive::Polyline(Polyline {
+                points: vec![Vec3::ZERO, Vec3::X],
+                color: Color::RED,
+                width: 1.0,
+            }),
+        ));
+        g.set_scale_override(EntityId(51), Some(5.0));
+        g.upsert(SceneEntity::new(
+            EntityId(51),
+            ScenePrimitive::Polyline(Polyline {
+                points: vec![Vec3::Y, Vec3::Z],
+                color: Color::GREEN,
+                width: 2.0,
+            }),
+        ));
+        match &g.entities[&EntityId(51)].primitive {
+            ScenePrimitive::Polyline(p) => assert!((p.width - 5.0).abs() < 1e-6),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn clearing_override_drops_map_entry() {
+        let mut g = SceneGraph::default();
+        g.upsert(SceneEntity::new(
+            EntityId(52),
+            ScenePrimitive::Points(vec![]),
+        ));
+        g.set_color_override(EntityId(52), Some(Color::BLUE));
+        assert!(g.style_overrides.contains_key(&EntityId(52)));
+        g.set_color_override(EntityId(52), None);
+        assert!(!g.style_overrides.contains_key(&EntityId(52)));
     }
 
     #[test]

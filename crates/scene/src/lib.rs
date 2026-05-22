@@ -9,7 +9,10 @@ pub mod graph;
 pub mod primitives;
 
 pub use color::{Color, Colormap};
-pub use graph::{EntityId, SceneEntity, SceneGraph, SceneHandle, ScenePrimitive};
+pub use graph::{
+    apply_color, apply_scale, primitive_color, primitive_scale, EntityId, SceneEntity, SceneGraph,
+    SceneHandle, ScenePrimitive, StyleOverride,
+};
 pub use primitives::{
     Arrow, Frame, Grid, GridData, Label, Material, Mesh, Point, Polyline, TextureHandle, Vertex,
 };

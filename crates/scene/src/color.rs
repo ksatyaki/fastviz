@@ -29,11 +29,66 @@ impl Color {
     pub fn to_array(self) -> [f32; 4] {
         [self.r, self.g, self.b, self.a]
     }
+
+    /// Format as `#RRGGBB`. Alpha is dropped (UI only exposes RGB).
+    pub fn to_hex(self) -> String {
+        let clamp = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        format!("#{:02X}{:02X}{:02X}", clamp(self.r), clamp(self.g), clamp(self.b))
+    }
+
+    /// Parse `#RRGGBB`, `RRGGBB`, `#RGB`, or `RGB`. Returns `None` on any
+    /// malformed input. Alpha is preserved at 1.0.
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let s = s.trim().trim_start_matches('#');
+        let (r, g, b) = match s.len() {
+            6 => (
+                u8::from_str_radix(&s[0..2], 16).ok()?,
+                u8::from_str_radix(&s[2..4], 16).ok()?,
+                u8::from_str_radix(&s[4..6], 16).ok()?,
+            ),
+            3 => {
+                let hi = |c: char| u8::from_str_radix(&c.to_string(), 16).ok();
+                let mut chars = s.chars();
+                let r = hi(chars.next()?)?;
+                let g = hi(chars.next()?)?;
+                let b = hi(chars.next()?)?;
+                (r * 17, g * 17, b * 17)
+            }
+            _ => return None,
+        };
+        Some(Color::rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0))
+    }
 }
 
 impl Default for Color {
     fn default() -> Self {
         Color::WHITE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_round_trip_six_digit() {
+        let c = Color::from_hex("#FFAA00").unwrap();
+        assert_eq!(c.to_hex(), "#FFAA00");
+    }
+
+    #[test]
+    fn hex_accepts_three_digit_and_missing_hash() {
+        let a = Color::from_hex("#F0A").unwrap();
+        let b = Color::from_hex("ff00aa").unwrap();
+        assert!((a.r - 1.0).abs() < 1e-6);
+        assert!((b.b - 170.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn hex_rejects_garbage() {
+        assert!(Color::from_hex("not-a-color").is_none());
+        assert!(Color::from_hex("#FFAA").is_none());
+        assert!(Color::from_hex("#GGHHII").is_none());
     }
 }
 
