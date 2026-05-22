@@ -137,3 +137,10 @@ style  = { size = 2.0, color = [0.30, 0.85, 1.0], stride = 1 }
 # name      = "Robot Description"
 # urdf      = true
 # collapsed = true
+#
+# `tf = true` claims every TF-frame axis indicator into this group. Each known
+# frame on /tf or /tf_static becomes a row with its own visibility checkbox.
+# [[ui.group]]
+# name      = "TF Frames"
+# tf        = true
+# collapsed = true

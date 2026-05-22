@@ -12,10 +12,11 @@ pub mod node;
 pub mod stats;
 pub mod subscribers;
 pub mod tf;
+pub mod tf_axes;
 pub mod tf_refresh;
 pub mod urdf;
 
 pub use config::{RosConfig, UiGroup};
-pub use ids::URDF_LINK_BASE;
+pub use ids::{TF_FRAME_BASE, TF_FRAME_CAPACITY, URDF_LINK_BASE};
 pub use node::RosNode;
 pub use stats::RosStats;

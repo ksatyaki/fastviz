@@ -3,8 +3,11 @@ FROM ros:jazzy-ros-base
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Build chain + libclang for r2r/bindgen + winit X11/Wayland deps
-# + Vulkan loader & Mesa fallback ICD (NVIDIA Vulkan ICD is mounted in
-# at runtime by nvidia-container-toolkit on hosts that have it).
+# + Vulkan loader & Mesa fallback ICD. NVIDIA's Vulkan library
+# (libGLX_nvidia.so.0) is bind-mounted by nvidia-container-toolkit at
+# runtime; we bake the matching ICD manifest below so the loader can
+# actually discover it (the toolkit on some hosts mounts the lib but
+# not the manifest).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo curl ca-certificates git vim less \
         build-essential pkg-config \
@@ -15,6 +18,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglu1-mesa libglvnd0 libegl1 \
         nodejs npm \
     && rm -rf /var/lib/apt/lists/*
+
+# NVIDIA Vulkan ICD manifest. library_path is the soname so ldconfig
+# resolves it at load time — present on NVIDIA hosts (where the toolkit
+# bind-mounts the lib), absent on non-NVIDIA hosts (loader logs a
+# warning and falls back to Mesa). Same trick for EGL via GLVND.
+RUN mkdir -p /etc/vulkan/icd.d /usr/share/glvnd/egl_vendor.d \
+ && printf '%s\n' \
+        '{' \
+        '    "file_format_version": "1.0.0",' \
+        '    "ICD": {' \
+        '        "library_path": "libGLX_nvidia.so.0",' \
+        '        "api_version": "1.3.289"' \
+        '    }' \
+        '}' \
+        > /etc/vulkan/icd.d/nvidia_icd.json \
+ && printf '%s\n' \
+        '{' \
+        '    "file_format_version" : "1.0.0",' \
+        '    "ICD": {' \
+        '        "library_path": "libEGL_nvidia.so.0"' \
+        '    }' \
+        '}' \
+        > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
 
 # ROS2 message packages we'll subscribe to in M0.5
 RUN apt-get update && apt-get install -y --no-install-recommends \

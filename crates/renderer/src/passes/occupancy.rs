@@ -11,7 +11,7 @@ use scene::{Color, Colormap, EntityId, Grid, GridData, SceneGraph, ScenePrimitiv
 use crate::gpu::{GpuContext, DEPTH_FORMAT};
 
 #[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
+#[derive(Copy, Clone, PartialEq, Pod, Zeroable)]
 struct GridUniform {
     model: [[f32; 4]; 4],
     tint: [f32; 4],
@@ -30,6 +30,13 @@ struct GpuGrid {
     bind_group: wgpu::BindGroup,
     cols: u32,
     rows: u32,
+    /// `entity.revision` of the texels currently sitting on the GPU. The
+    /// prepare loop only re-bakes + re-uploads when this falls behind, so a
+    /// static map (one publish, many frames) costs zero per-frame upload.
+    uploaded_revision: u64,
+    /// Last uniform we wrote to the UBO. Maps rarely move once placed, so
+    /// skipping unchanged uniform writes keeps the queue quiet too.
+    last_uniform: Option<GridUniform>,
 }
 
 pub struct OccupancyPass {
@@ -183,21 +190,26 @@ impl OccupancyPass {
             let ScenePrimitive::Grid(grid) = &entity.primitive else { continue };
             seen.insert(entity.id);
 
+            // Re-create the GPU grid when dimensions change OR when no entry
+            // exists yet. A dimension change forces a fresh texture; we mark
+            // the new entry as "stale" (uploaded_revision = revision - 1) so
+            // the upload branch below runs once.
             let needs_new = match self.grids.get(&entity.id) {
                 Some(g) => g.cols != grid.cols || g.rows != grid.rows,
                 None => true,
             };
             if needs_new {
-                self.grids
-                    .insert(entity.id, create_gpu_grid(gpu, &self.bgl, &self.sampler, grid));
+                let mut gg = create_gpu_grid(gpu, &self.bgl, &self.sampler, grid);
+                gg.uploaded_revision = entity.revision.wrapping_sub(1);
+                self.grids.insert(entity.id, gg);
             }
 
             let gg = self.grids.get_mut(&entity.id).unwrap();
 
-            // Re-upload texels every frame for now — cheap for the small
-            // grids M0 produces. We'll honor the `dirty` flag once OccupancyGrid
-            // arrives and grids get larger (M0.5).
-            {
+            // Re-bake + re-upload only when the payload has actually changed
+            // since the last frame we saw it. For a typical static map (one
+            // publish, latched), this branch runs exactly once.
+            if gg.uploaded_revision != entity.revision {
                 let pixels = bake_pixels(grid);
                 gpu.queue.write_texture(
                     wgpu::ImageCopyTexture {
@@ -218,6 +230,7 @@ impl OccupancyPass {
                         depth_or_array_layers: 1,
                     },
                 );
+                gg.uploaded_revision = entity.revision;
             }
 
             // Update uniform: model matrix that places the unit quad on the XY-aligned
@@ -236,8 +249,11 @@ impl OccupancyPass {
                 model: model.to_cols_array_2d(),
                 tint: Color::rgba(1.0, 1.0, 1.0, 0.85).to_array(),
             };
-            gpu.queue
-                .write_buffer(&gg.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+            if gg.last_uniform != Some(uniform) {
+                gpu.queue
+                    .write_buffer(&gg.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+                gg.last_uniform = Some(uniform);
+            }
         }
 
         self.grids.retain(|id, _| seen.contains(id));
@@ -319,6 +335,8 @@ fn create_gpu_grid(
         bind_group,
         cols: grid.cols,
         rows: grid.rows,
+        uploaded_revision: 0,
+        last_uniform: None,
     }
 }
 

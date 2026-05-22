@@ -18,6 +18,14 @@ pub const ROS_ID_POINTCLOUD_BASE: u64 = 2400; // PointCloud2 topics
 /// URDF link entities live at 3000.. (plan §3.1).
 pub const URDF_LINK_BASE: u64 = 3000;
 
+/// TF-frame axis indicators live above the URDF range. Each frame in the TF
+/// tree is materialised as a `ScenePrimitive::Frame` entity with a stable id
+/// allocated in encounter order from this base.
+pub const TF_FRAME_BASE: u64 = 2_000_000;
+/// Upper bound on simultaneously tracked TF frames. Used by the UI to identify
+/// TF entities by id range (mirrors how `URDF_LINK_BASE` works in ui.rs).
+pub const TF_FRAME_CAPACITY: u64 = 1_000_000;
+
 pub fn pose_id(topic_index: usize) -> EntityId {
     EntityId(ROS_ID_POSE_BASE + topic_index as u64)
 }

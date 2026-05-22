@@ -9,6 +9,15 @@ const URDF_LINK_BASE: u64 = ros_node::URDF_LINK_BASE;
 #[cfg(not(feature = "ros"))]
 const URDF_LINK_BASE: u64 = u64::MAX;
 
+#[cfg(feature = "ros")]
+const TF_FRAME_BASE: u64 = ros_node::TF_FRAME_BASE;
+#[cfg(feature = "ros")]
+const TF_FRAME_CAPACITY: u64 = ros_node::TF_FRAME_CAPACITY;
+#[cfg(not(feature = "ros"))]
+const TF_FRAME_BASE: u64 = u64::MAX;
+#[cfg(not(feature = "ros"))]
+const TF_FRAME_CAPACITY: u64 = 0;
+
 #[derive(Copy, Clone, Default)]
 pub struct Pc2Stats {
     pub received: u64,
@@ -22,6 +31,7 @@ pub struct UiGroupView {
     pub name: String,
     pub topics: Vec<String>,
     pub urdf: bool,
+    pub tf: bool,
     /// Current fold state — starts at `collapsed` from TOML, then user-driven.
     pub open: bool,
 }
@@ -36,6 +46,7 @@ impl UiGroupView {
                 name: g.name.clone(),
                 topics: g.topics.clone(),
                 urdf: g.urdf,
+                tf: g.tf,
                 open: !g.collapsed,
             })
             .collect()
@@ -107,8 +118,12 @@ pub fn draw(
                     let label_token = label.split_whitespace().next().unwrap_or("");
                     let is_urdf =
                         id.0 >= URDF_LINK_BASE && id.0 < URDF_LINK_BASE.saturating_add(1_000_000);
+                    let is_tf = id.0 >= TF_FRAME_BASE
+                        && id.0 < TF_FRAME_BASE.saturating_add(TF_FRAME_CAPACITY);
                     groups.iter().position(|g| {
-                        (g.urdf && is_urdf) || g.topics.iter().any(|t| t == label_token)
+                        (g.urdf && is_urdf)
+                            || (g.tf && is_tf)
+                            || g.topics.iter().any(|t| t == label_token)
                     })
                 })
                 .collect();

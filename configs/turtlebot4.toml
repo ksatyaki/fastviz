@@ -12,7 +12,11 @@ node_name       = "fastviz"
 namespace       = ""
 # The sim publishes odom -> base_link continuously; map is only present once
 # SLAM/Nav2 are running. Use odom so the robot appears immediately.
-reference_frame = "odom"
+reference_frame = "map"
+
+[tf]
+topic        = "/tf"
+static_topic = "/tf_static"
 
 [urdf]
 topic              = "/robot_description"
@@ -37,4 +41,11 @@ topics = ["/sensors/lidar3d_0/scan", "/sensors/lidar3d_0/points"]
 [[ui.group]]
 name      = "Robot Description"
 urdf      = true
+collapsed = true
+
+# Every frame seen on /tf or /tf_static gets a colored axis indicator (R/G/B
+# for X/Y/Z). Per-frame checkbox lets you toggle individuals on or off.
+[[ui.group]]
+name      = "TF Frames"
+tf        = true
 collapsed = true

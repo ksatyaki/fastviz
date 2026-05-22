@@ -71,12 +71,15 @@ pub struct RosConfig {
 
 /// One side-panel group. Entities are matched by exact label (topic name) and
 /// rendered in the order topics appear in `topics`. With `urdf = true`, every
-/// URDF link is appended to the group (in link order).
+/// URDF link is appended to the group (in link order). With `tf = true`, every
+/// TF-frame axis entity is appended (in encounter order, which is roughly the
+/// order frames first arrive on /tf or /tf_static).
 #[derive(Clone, Debug)]
 pub struct UiGroup {
     pub name: String,
     pub topics: Vec<String>,
     pub urdf: bool,
+    pub tf: bool,
     /// Initial fold state. Toggleable in the UI; this is just the default.
     pub collapsed: bool,
 }
@@ -282,6 +285,8 @@ pub struct RawUiGroup {
     pub topics: Vec<String>,
     /// When true, every URDF link is appended to the group.
     pub urdf: bool,
+    /// When true, every TF-frame axis entity is appended to the group.
+    pub tf: bool,
     /// Default fold state — toggleable at runtime.
     pub collapsed: bool,
 }
@@ -503,6 +508,7 @@ impl RawConfig {
                         name: g.name,
                         topics: g.topics,
                         urdf: g.urdf,
+                        tf: g.tf,
                         collapsed: g.collapsed,
                     })
                     .collect()

@@ -19,6 +19,7 @@ use crate::config::RosConfig;
 use crate::stats::RosStats;
 use crate::subscribers;
 use crate::tf::TfTree;
+use crate::tf_axes::TfAxesRegistry;
 use crate::tf_refresh::TfRegistry;
 use crate::urdf::UrdfModel;
 
@@ -89,6 +90,7 @@ fn run(
     let spawner = pool.spawner();
     let tf_tree = Arc::new(TfTree::new());
     let tf_refresh = TfRegistry::new();
+    let tf_axes = TfAxesRegistry::new();
 
     subscribers::tf::spawn(&mut node, &spawner, tf_tree.clone(), &cfg).context("TF subscribers")?;
     let mut registry = subscribers::discovery::bootstrap(
@@ -186,6 +188,9 @@ fn run(
         // fix a scan/cloud/URDF that was rendered with `IDENTITY` because TF
         // wasn't ready when its message arrived.
         tf_refresh.refresh(&tf_tree, &cfg.reference_frame, &scene);
+        // Re-publish per-frame axis entities so the user gets an RViz-style TF
+        // display they can toggle per-frame in the side panel.
+        tf_axes.refresh(&tf_tree, &cfg.reference_frame, &scene);
         tick_count = tick_count.wrapping_add(1);
         if tick_count.is_multiple_of(DISCOVERY_EVERY_N_TICKS) {
             if let Err(e) = subscribers::discovery::tick(
