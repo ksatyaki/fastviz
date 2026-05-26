@@ -1,4 +1,4 @@
-<img src="LOGO.png" alt="Logo" width="180"/>
+<img src="LOGO.png" alt="Logo" width="500"/>
 
 A Rust-based ROS2 visualizer built on `wgpu` + `egui`. RViz alternative.
 
