@@ -10,10 +10,20 @@ permissions:
 
 jobs:
   build-linux:
-    name: build x86_64-unknown-linux-gnu
+    name: build ${{ matrix.ros }} (${{ matrix.codename }})
     runs-on: ubuntu-latest
     container:
-      image: ros:jazzy-ros-base
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ros: humble
+            codename: jammy
+            image: ros:humble-ros-base
+          - ros: jazzy
+            codename: noble
+            image: ros:jazzy-ros-base
     steps:
       - name: Install build dependencies
         run: |
@@ -24,11 +34,11 @@ jobs:
             clang libclang-dev \
             libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libwayland-dev libssl-dev \
-            ros-jazzy-tf2-msgs \
-            ros-jazzy-nav-msgs \
-            ros-jazzy-sensor-msgs \
-            ros-jazzy-geometry-msgs \
-            ros-jazzy-visualization-msgs
+            ros-${{ matrix.ros }}-tf2-msgs \
+            ros-${{ matrix.ros }}-nav-msgs \
+            ros-${{ matrix.ros }}-sensor-msgs \
+            ros-${{ matrix.ros }}-geometry-msgs \
+            ros-${{ matrix.ros }}-visualization-msgs
           rm -rf /var/lib/apt/lists/*
 
       - uses: actions/checkout@v4
@@ -44,24 +54,44 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin
             target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.ros }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-deb
+        run: |
+          if ! command -v cargo-deb >/dev/null; then
+            cargo install cargo-deb --locked
+          fi
 
       - name: Build release
         env:
           LIBCLANG_PATH: /usr/lib/x86_64-linux-gnu
+          # Bake an rpath so the installed binary finds librcl.so etc. without
+          # needing `source /opt/ros/<distro>/setup.bash` first. The build env
+          # still needs the setup script sourced so r2r's bindgen can find the
+          # ROS message headers.
+          RUSTFLAGS: "-C link-arg=-Wl,-rpath,/opt/ros/${{ matrix.ros }}/lib"
         run: |
-          . /opt/ros/jazzy/setup.sh
+          . /opt/ros/${{ matrix.ros }}/setup.sh
           cargo build --release --locked --bin app
 
-      - name: Stage artifact
+      - name: Stage tarball
         run: |
           mkdir -p dist
           tag="${GITHUB_REF_NAME}"
-          name="app-${tag}-x86_64-unknown-linux-gnu"
+          name="app-${tag}-x86_64-unknown-linux-gnu-${{ matrix.codename }}-${{ matrix.ros }}"
           cp target/release/app "dist/${name}"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           rm "dist/${name}"
+
+      - name: Build .deb
+        env:
+          LIBCLANG_PATH: /usr/lib/x86_64-linux-gnu
+        run: |
+          . /opt/ros/${{ matrix.ros }}/setup.sh
+          cargo deb -p app --variant ${{ matrix.ros }} --no-build --no-strip
+          mv target/debian/*.deb dist/
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2

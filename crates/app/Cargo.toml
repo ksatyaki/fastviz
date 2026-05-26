@@ -32,3 +32,38 @@ anyhow = { workspace = true }
 [[bin]]
 name = "app"
 path = "src/main.rs"
+
+# Debian packaging via `cargo-deb`. One .deb is produced per ROS distro because
+# the message packages and underlying Ubuntu release differ.
+#
+#   cargo deb -p app --variant humble --no-build   # Ubuntu 22.04 / ROS Humble
+#   cargo deb -p app --variant jazzy  --no-build   # Ubuntu 24.04 / ROS Jazzy
+#
+# Asset paths are resolved relative to this manifest, except `target/release/app`
+# which cargo-deb pulls from the workspace target dir.
+[package.metadata.deb]
+maintainer = "Chittaranjan Swaminathan <ksatyaki@gmail.com>"
+copyright = "2024-2026, Chittaranjan Swaminathan and fastviz contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+A Rust-based ROS2 visualizer built on wgpu + egui.
+A drop-in alternative to RViz with TF, OccupancyGrid, PoseStamped, PoseArray,
+Path, LaserScan, PointCloud2, URDF + JointState (with STL/OBJ/DAE meshes), and
+visualization_msgs/Marker(Array) support."""
+section = "graphics"
+priority = "optional"
+assets = [
+    ["target/release/app", "usr/bin/fastviz", "755"],
+    ["../../configs/default.toml", "usr/share/fastviz/configs/default.toml", "644"],
+    ["../../configs/simple.toml", "usr/share/fastviz/configs/simple.toml", "644"],
+    ["../../configs/turtlebot4.toml", "usr/share/fastviz/configs/turtlebot4.toml", "644"],
+    ["../../README.md", "usr/share/doc/fastviz/README.md", "644"],
+]
+
+[package.metadata.deb.variants.humble]
+name = "fastviz-humble"
+depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-humble-tf2-msgs, ros-humble-nav-msgs, ros-humble-sensor-msgs, ros-humble-geometry-msgs, ros-humble-visualization-msgs"
+
+[package.metadata.deb.variants.jazzy]
+name = "fastviz-jazzy"
+depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-jazzy-tf2-msgs, ros-jazzy-nav-msgs, ros-jazzy-sensor-msgs, ros-jazzy-geometry-msgs, ros-jazzy-visualization-msgs"

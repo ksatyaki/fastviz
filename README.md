@@ -6,23 +6,44 @@ A Rust-based ROS2 visualizer built on `wgpu` + `egui`. RViz alternative.
 
 ### Prebuilt release (Linux x86_64)
 
-Each tagged release publishes a Linux x86_64 binary on the [Releases page](../../releases). Grab the latest tarball and drop it on your `PATH`:
+Each tagged release publishes Ubuntu 22.04 / ROS Humble and Ubuntu 24.04 / ROS Jazzy artifacts on the [Releases page](../../releases) — both as a tarball and as a `.deb`.
+
+#### Option A — .deb (recommended)
+
+The `.deb` declares all runtime dependencies, including the ROS message packages and Vulkan loader, so `apt` pulls them in for you. Pick the file that matches your distro:
+
+| OS                  | Asset                                            |
+| ------------------- | ------------------------------------------------ |
+| Ubuntu 22.04 / Humble | `fastviz-humble_<version>-1_amd64.deb`         |
+| Ubuntu 24.04 / Jazzy  | `fastviz-jazzy_<version>-1_amd64.deb`          |
+
+```sh
+curl -LO "https://github.com/OWNER/REPO/releases/latest/download/fastviz-jazzy_<version>-1_amd64.deb"
+sudo apt install ./fastviz-jazzy_<version>-1_amd64.deb
+fastviz --config /usr/share/fastviz/configs/default.toml
+```
+
+The installed binary has the ROS lib directory baked into its rpath, so you do *not* need to `source /opt/ros/<distro>/setup.bash` before launching it.
+
+#### Option B — tarball
 
 ```sh
 tag=$(curl -s https://api.github.com/repos/OWNER/REPO/releases/latest | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
-curl -L -o fastviz.tar.gz "https://github.com/OWNER/REPO/releases/download/${tag}/app-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+# pick `noble-jazzy` or `jammy-humble`
+asset="app-${tag}-x86_64-unknown-linux-gnu-noble-jazzy.tar.gz"
+curl -L -o fastviz.tar.gz "https://github.com/OWNER/REPO/releases/download/${tag}/${asset}"
 tar -xzf fastviz.tar.gz
-sudo install -m 0755 "app-${tag}-x86_64-unknown-linux-gnu" /usr/local/bin/fastviz
+sudo install -m 0755 "${asset%.tar.gz}" /usr/local/bin/fastviz
 ```
 
 Replace `OWNER/REPO` with the repo slug (or just download the asset from the Releases page in a browser).
 
-### Runtime dependencies
+### Runtime dependencies (tarball only — the .deb pulls these in)
 
 The release binary is dynamically linked. On the host you'll need:
 
-- **ROS2 Jazzy** (Ubuntu 24.04). Source it before launching: `source /opt/ros/jazzy/setup.bash`. Other distros are untested.
-- ROS2 message packages used by the subscribers:
+- **ROS2 Humble** (Ubuntu 22.04) or **ROS2 Jazzy** (Ubuntu 24.04) — pick the artifact that matches. Other distros are untested.
+- ROS2 message packages used by the subscribers (substitute `humble` for `jazzy` on 22.04):
   ```sh
   sudo apt-get install -y \
     ros-jazzy-tf2-msgs ros-jazzy-nav-msgs ros-jazzy-sensor-msgs \
