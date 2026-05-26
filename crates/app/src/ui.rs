@@ -111,8 +111,23 @@ pub fn draw(
     tf_axis_length: &mut f32,
     discoverer: &mut TopicDiscovererState,
     edit_state: &mut EntityEditState,
+    follow_frame: &mut Option<String>,
     #[cfg(feature = "ros")] topic_ctx: Option<TopicDiscovererCtx<'_>>,
 ) {
+    // Build the list of TF frames currently in the scene for the follow-frame
+    // dropdown. Cheap — there are typically tens of frames.
+    let mut available_frames: Vec<String> = scene
+        .entities
+        .values()
+        .filter_map(|e| {
+            e.label
+                .as_deref()
+                .and_then(|l| l.strip_prefix("tf: "))
+                .map(|s| s.to_string())
+        })
+        .collect();
+    available_frames.sort();
+    available_frames.dedup();
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.heading("fastviz");
@@ -128,6 +143,25 @@ pub fn draw(
             }
             ui.separator();
             ui.checkbox(show_reference_grid, "ref grid");
+            ui.separator();
+            ui.label("follow:");
+            let current = follow_frame.clone().unwrap_or_else(|| "(none)".to_string());
+            egui::ComboBox::from_id_salt("follow_frame_combo")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_label(follow_frame.is_none(), "(none)")
+                        .clicked()
+                    {
+                        *follow_frame = None;
+                    }
+                    for name in &available_frames {
+                        let selected = follow_frame.as_deref() == Some(name.as_str());
+                        if ui.selectable_label(selected, name).clicked() {
+                            *follow_frame = Some(name.clone());
+                        }
+                    }
+                });
             #[cfg(feature = "ros")]
             {
                 ui.separator();

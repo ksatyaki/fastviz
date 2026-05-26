@@ -64,18 +64,24 @@ impl OrbitCamera {
     }
 
     /// Pan the target in the plane perpendicular to the view direction.
-    pub fn pan(&mut self, dx: f32, dy: f32) {
+    /// `dx`/`dy` are pixel deltas; `viewport_height` is the framebuffer height
+    /// in pixels. The pan amount is the exact world-distance corresponding to
+    /// the cursor motion at the target plane, so geometry under the cursor
+    /// moves with the mouse 1:1 regardless of zoom level.
+    pub fn pan(&mut self, dx: f32, dy: f32, viewport_height: f32) {
         let view = self.view_matrix();
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
-        let scale = self.distance * 0.0015;
-        self.target += right * (-dx * scale) + up * (dy * scale);
+        // World units per pixel at the target plane (perspective).
+        let world_per_pixel =
+            2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height.max(1.0);
+        self.target += right * (-dx * world_per_pixel) + up * (dy * world_per_pixel);
     }
 
     /// Scroll → zoom. Positive `delta` zooms in.
     pub fn zoom(&mut self, delta: f32) {
         let factor = (1.0 - delta * 0.1).clamp(0.1, 10.0);
-        self.distance = (self.distance * factor).clamp(0.1, 1000.0);
+        self.distance = (self.distance * factor).clamp(0.01, 5000.0);
     }
 
     pub fn reset_default(&mut self) {

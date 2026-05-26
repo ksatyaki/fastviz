@@ -17,7 +17,7 @@ use r2r::{nav_msgs, QosProfile};
 use scene::{Colormap, Grid, GridData, SceneEntity, SceneHandle, ScenePrimitive};
 
 use crate::config::RosConfig;
-use crate::coords::ROS_TO_WORLD;
+use crate::coords::{QUAD_SWAP, ROS_TO_WORLD};
 use crate::ids::ROS_ID_MAP;
 use crate::tf::TfTree;
 
@@ -144,8 +144,10 @@ fn build_entity(
     };
 
     // entity.transform takes the renderer's local XZ-plane quad → world.
-    // See coords.rs for the conjugation rationale.
-    let transform = ROS_TO_WORLD * tf_ref_from_frame * pose_in_frame * ROS_TO_WORLD;
+    // QUAD_SWAP reinterprets the quad's (qx, 0, qz) as a ROS XY-plane point
+    // before the ROS-side transforms run, and ROS_TO_WORLD finishes the trip
+    // into renderer world space.
+    let transform = ROS_TO_WORLD * tf_ref_from_frame * pose_in_frame * QUAD_SWAP;
 
     Some(
         SceneEntity::new(ROS_ID_MAP, ScenePrimitive::Grid(grid))

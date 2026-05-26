@@ -104,9 +104,9 @@ impl MeshPass {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                // Backface culling disabled: URDF meshes go through
-                // `ROS_TO_WORLD` (a reflection, det = -1), which flips winding
-                // and would otherwise show only the inside of every mesh.
+                // Backface culling disabled: URDF meshes have unreliable
+                // winding (Collada exporters and many ROS meshes are not
+                // consistent about it), so culling tends to hide geometry.
                 cull_mode: None,
                 ..Default::default()
             },

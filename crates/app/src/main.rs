@@ -70,6 +70,11 @@ struct AppContext {
     active_topics: Vec<String>,
     input: InputState,
     show_reference_grid: bool,
+    /// Optional TF frame for the camera to follow. When set, the camera target
+    /// is snapped each frame to the world-space position of that frame.
+    /// Distinct from `reference_frame` (which is the fixed rendering frame);
+    /// follow_frame only affects the view, not what's drawn or in which frame.
+    follow_frame: Option<String>,
     /// PC2 messages we've witnessed in `RosStats` so far. Compared to the
     /// current value on each draw to count how many distinct frames actually
     /// reached the screen.
@@ -275,6 +280,7 @@ impl ApplicationHandler for App {
             active_topics,
             input: InputState::default(),
             show_reference_grid: true,
+            follow_frame: None,
             pc2_last_seen_received: 0,
             pc2_displayed: 0,
             pc2_stats_started_at: std::time::Instant::now(),
@@ -323,7 +329,8 @@ impl ApplicationHandler for App {
                         ctx.renderer.camera.orbit(dx, dy);
                         ctx.window.request_redraw();
                     } else if ctx.input.right_down {
-                        ctx.renderer.camera.pan(dx, dy);
+                        let h = ctx.renderer.gpu.surface_config.height as f32;
+                        ctx.renderer.camera.pan(dx, dy, h);
                         ctx.window.request_redraw();
                     }
                 }
@@ -445,6 +452,7 @@ impl AppContext {
             let tf_len = &mut self.tf_axis_length;
             let discoverer = &mut self.discoverer;
             let edit_state = &mut self.edit_state;
+            let follow = &mut self.follow_frame;
             self.egui.run_ui(&window, |egui_ctx| {
                 let mut scene = scene.write();
                 ui::draw(
@@ -458,11 +466,28 @@ impl AppContext {
                     tf_len,
                     discoverer,
                     edit_state,
+                    follow,
                     #[cfg(feature = "ros")]
                     topic_ctx,
                 );
             })
         };
+
+        // Apply follow-frame: snap camera target to the TF frame's current
+        // world position. The frame's entity transform already takes the frame
+        // origin to renderer-world coords.
+        if let Some(name) = self.follow_frame.as_deref() {
+            let scene = self.scene.read();
+            let target_label = format!("tf: {name}");
+            if let Some(e) = scene
+                .entities
+                .values()
+                .find(|e| e.label.as_deref() == Some(target_label.as_str()))
+            {
+                let p = e.transform.transform_point3(glam::Vec3::ZERO);
+                self.renderer.camera.target = p;
+            }
+        }
 
         // Mirror UI-driven TF scale into the ROS executor's shared atomic.
         #[cfg(feature = "ros")]
