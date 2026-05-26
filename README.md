@@ -1,6 +1,8 @@
-# fastviz
+<img src="LOGO.png" alt="Logo" width="180"/>
 
 A Rust-based ROS2 visualizer built on `wgpu` + `egui`. RViz alternative.
+
+<img src="Screenshot.png" alt="Screenshot" width="720"/>
 
 ## Install
 
