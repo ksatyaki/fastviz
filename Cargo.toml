@@ -39,3 +39,5 @@ mesh-loader = "0.1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+strip = true
+opt-level = 3

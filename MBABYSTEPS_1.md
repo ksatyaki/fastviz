@@ -8,6 +8,8 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 
 ## 0. Progress (as of 2026-05-26)
 
+M0.5 is complete. All steps below shipped; see §2 for the marker step write-up (the last and most recent landing) and the commit log for everything earlier.
+
 | Step | What | Status |
 |---|---|---|
 | A (0.5.1) | Crate skeleton + `RosNode::spawn` thread + clean shutdown | ✅ done |
@@ -23,6 +25,7 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 | H.2 | PointPass perf: revision-cached, GPU-side transform, buffer reuse | ✅ done |
 | I (0.5.7) | URDF + JointState → meshes + FK | ✅ done |
 | J | `visualization_msgs/Marker` + `MarkerArray` → primitives | ✅ done (2026-05-26) |
+| K | Release CI — tag-triggered Linux x86_64 build via `ros:jazzy-ros-base` container, uploads tarball to GitHub Releases | ✅ done (2026-05-26) |
 
 ---
 
@@ -39,43 +42,9 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 
 ---
 
-## 2. Step I — URDF + JointState (next)
+## 2. Conventions
 
-Workspace deps to add when starting:
-
-```toml
-urdf-rs = "0.8"
-stl_io = "0.8"          # binary STL loader
-tobj = "4"              # OBJ loader (no MTL needed for M0.5)
-```
-
-New modules under `crates/ros_node/src/`:
-- `urdf.rs` — parse URDF, load STL/OBJ, FK
-- `subscribers/jointstate.rs` — `sensor_msgs/JointState` → mesh transforms
-
-Implementation outline:
-
-`urdf-rs::read_from_file(...)` → `Robot`. For each `Link` with a `Visual.geometry::Mesh`, resolve the mesh path (`package://foo/bar.stl` lookup uses `AMENT_PREFIX_PATH` env). Load with `stl_io` for STL or `tobj` for OBJ, convert to `scene::primitives::Mesh`. Register each link as a `SceneEntity` whose `transform` will be updated by FK.
-
-`JointState` callback:
-1. Update internal joint angle map.
-2. Walk the URDF kinematic chain → compute world transforms per link (root identity, accumulate joint transforms).
-3. For each link, `scene.update_transform(entity_id, world_xform)` — no GPU re-upload (mesh data unchanged).
-
-CLI arg: `--urdf /path/to/robot.urdf`. If provided, load at startup; otherwise skip.
-
-Smoke test:
-```bash
-cargo run -p app -- --urdf /opt/ros/jazzy/share/turtlebot3_description/urdf/turtlebot3_burger.urdf
-# wiggle joints with:
-ros2 run joint_state_publisher_gui joint_state_publisher_gui
-```
-
----
-
-## 3. Conventions
-
-### 3.1 EntityId allocation
+### 2.1 EntityId allocation
 
 | Range | Owner |
 |---|---|
@@ -85,17 +54,17 @@ ros2 run joint_state_publisher_gui joint_state_publisher_gui
 | `3000..=3999` | URDF link entities |
 | `4_000_000..` | `visualization_msgs/Marker` entities — 100k-wide slab per marker topic; each `(ns, id)` from the publisher gets one slot, allocated on first sight (see `ids::marker_topic_base`). |
 
-### 3.2 Reference frame
+### 2.2 Reference frame
 
 `SceneGraph::reference_frame` (currently `"map"` from M0) is the target for all TF lookups. User-configurable via `--ref-frame` CLI flag and the config file.
 
-### 3.3 Visibility and labels
+### 2.3 Visibility and labels
 
 Every entity should be created with `with_label(topic_name_or_link_name)` so the entity list panel is meaningful.
 
 ---
 
-## 4. Things explicitly out of scope for M0.5
+## 3. Things explicitly out of scope for M0.5
 
 - `Image`, `Imu`, `Odometry` → milestones 1–4.
 - MCAP record/playback → M5.
@@ -106,7 +75,7 @@ Every entity should be created with `with_label(topic_name_or_link_name)` so the
 
 ---
 
-## 5. Step J — `visualization_msgs/Marker` (done 2026-05-26)
+## 4. Step J — `visualization_msgs/Marker` (done 2026-05-26)
 
 Pulled forward from M1 because it's a single-message subscriber and the
 existing primitive set already covers most marker shapes. Added:

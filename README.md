@@ -2,57 +2,87 @@
 
 A Rust-based ROS2 visualizer built on `wgpu` + `egui`. RViz alternative.
 
-## Installation
+## Install
 
-### Prerequisites
+### Prebuilt release (Linux x86_64)
 
-- ROS2 **Jazzy** (24.04). Other distros are untested.
-- A Rust toolchain — see [rust-toolchain.toml](rust-toolchain.toml). [rustup](https://rustup.rs) picks this up automatically.
-- `r2r`'s `bindgen` step needs libclang. On Debian/Ubuntu:
-
-  ```sh
-  sudo apt-get install -y libclang-dev clang
-  export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu
-  ```
-- Vulkan loader (`libvulkan1` on Ubuntu) for `wgpu`. NVIDIA users also want `nvidia-container-toolkit` if running inside Docker.
-
-### Build
-
-Source ROS2, then build the workspace:
+Each tagged release publishes a Linux x86_64 binary on the [Releases page](../../releases). Grab the latest tarball and drop it on your `PATH`:
 
 ```sh
+tag=$(curl -s https://api.github.com/repos/OWNER/REPO/releases/latest | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
+curl -L -o fastviz.tar.gz "https://github.com/OWNER/REPO/releases/download/${tag}/app-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+tar -xzf fastviz.tar.gz
+sudo install -m 0755 "app-${tag}-x86_64-unknown-linux-gnu" /usr/local/bin/fastviz
+```
+
+Replace `OWNER/REPO` with the repo slug (or just download the asset from the Releases page in a browser).
+
+### Runtime dependencies
+
+The release binary is dynamically linked. On the host you'll need:
+
+- **ROS2 Jazzy** (Ubuntu 24.04). Source it before launching: `source /opt/ros/jazzy/setup.bash`. Other distros are untested.
+- ROS2 message packages used by the subscribers:
+  ```sh
+  sudo apt-get install -y \
+    ros-jazzy-tf2-msgs ros-jazzy-nav-msgs ros-jazzy-sensor-msgs \
+    ros-jazzy-geometry-msgs ros-jazzy-visualization-msgs
+  ```
+- **Vulkan loader + an ICD** for `wgpu`:
+  ```sh
+  sudo apt-get install -y libvulkan1 vulkan-tools mesa-vulkan-drivers
+  ```
+  On NVIDIA hosts, the proprietary driver provides its own ICD — install `nvidia-driver-*` from the Ubuntu archive (or the upstream `.run` installer). Verify with `vulkaninfo --summary`.
+- Windowing/input libraries (usually already present on a desktop install): `libxkbcommon0`, `libwayland-client0`, `libxcb1`.
+
+### Build from source
+
+```sh
+sudo apt-get install -y build-essential pkg-config clang libclang-dev \
+  libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+  libxkbcommon-dev libwayland-dev libssl-dev \
+  libvulkan1 vulkan-tools mesa-vulkan-drivers
+export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu   # r2r's bindgen step needs this
 source /opt/ros/jazzy/setup.bash
 cargo build --release
 ```
 
-The binary lands at `target/release/app`.
+The binary lands at `target/release/app`. Toolchain version is pinned in [rust-toolchain.toml](rust-toolchain.toml); [rustup](https://rustup.rs) picks it up automatically.
 
 ### Dev container
 
-`.devcontainer/` ships an Ubuntu 24.04 + ROS2 Jazzy image with `r2r` build deps, the Vulkan loader, and your host's `~/.claude` mounted in. Open the folder in VS Code / Cursor and pick "Reopen in Container".
+If your host doesn't have ROS2 Jazzy (e.g. you're on Fedora, Arch, or a non-24.04 Ubuntu), use the bundled dev container — it ships Ubuntu 24.04 + Jazzy + the `r2r` build deps + the Vulkan loader, all pre-installed.
+
+```sh
+# VS Code / Cursor:
+#   1. Install the "Dev Containers" extension.
+#   2. Open the repo folder, then "Reopen in Container".
+```
+
+NVIDIA GPU passthrough requires [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host. The container ships an NVIDIA Vulkan ICD manifest that activates automatically when the toolkit bind-mounts the driver libs; on non-NVIDIA hosts it falls back to Mesa.
+
+See [.devcontainer/Dockerfile](.devcontainer/Dockerfile) for the exact image — it's also a good reference if you want to build your own container.
 
 ## Use
 
-The node always starts as a ROS2 visualizer — no flag needed:
+Source ROS2 first, then launch with a config file:
 
 ```sh
-cargo run -p app -- --config configs/default.toml
+source /opt/ros/jazzy/setup.bash
+fastviz --config configs/default.toml
 ```
 
 Common invocations:
 
 ```sh
 # TurtleBot 4 Gazebo sim — picks the URDF up off /robot_description
-cargo run -p app -- --config configs/turtlebot4.toml
+fastviz --config configs/turtlebot4.toml
 
 # Override the reference frame from the CLI (wins over the config file)
-cargo run -p app -- --config configs/default.toml --ref-frame odom
+fastviz --config configs/default.toml --ref-frame odom
 
 # Load a URDF from a file directly (skips /robot_description)
-cargo run -p app -- --config configs/default.toml --urdf /path/to/robot.urdf
-
-# No live ROS graph? Layer the M0 mock injector on top for a quick sanity check
-cargo run -p app -- --mock
+fastviz --config configs/default.toml --urdf /path/to/robot.urdf
 ```
 
 ### Supported message types
@@ -65,6 +95,8 @@ cargo run -p app -- --mock
 | `[paths]`                           | `nav_msgs/Path`                  | `Polyline`       |
 | `[scans]`                           | `sensor_msgs/LaserScan`          | `Points`         |
 | `[points]`                          | `sensor_msgs/PointCloud2`        | `Points`         |
+| `[markers]`                         | `visualization_msgs/Marker`      | mixed primitives |
+| `[marker_arrays]`                   | `visualization_msgs/MarkerArray` | mixed primitives |
 | `[tf]` (`/tf`, `/tf_static`)        | `tf2_msgs/TFMessage`             | TF tree          |
 | `[urdf]` (`/robot_description`)     | `std_msgs/String` + `JointState` | meshes + FK      |
 
@@ -83,7 +115,7 @@ Mesh files referenced from a URDF can be `.stl`, `.obj`, or `.dae` (Collada). `p
 ### CLI
 
 ```
-app [--mock] [--ref-frame FRAME] [--config PATH] [--urdf PATH] [--width N] [--height N]
+fastviz [--ref-frame FRAME] [--config PATH] [--urdf PATH] [--width N] [--height N]
 ```
 
 `--ref-frame` and `--urdf` win over the matching config-file values when both are set.
@@ -92,7 +124,7 @@ app [--mock] [--ref-frame FRAME] [--config PATH] [--urdf PATH] [--width N] [--he
 
 [configs/default.toml](configs/default.toml) mirrors `RosConfig::default()` and is the source of truth. Other presets live alongside it (e.g. [configs/turtlebot4.toml](configs/turtlebot4.toml)). Key features:
 
-- Each per-message kind (`[map]`, `[poses]`, `[pose_arrays]`, `[paths]`, `[scans]`, `[points]`) takes a `topics = [...]` list.
+- Each per-message kind (`[map]`, `[poses]`, `[pose_arrays]`, `[paths]`, `[scans]`, `[points]`, `[markers]`, `[marker_arrays]`) takes a `topics = [...]` list.
 - A bare `"*"` element enables polled discovery: anything in the ROS graph with the matching message type is auto-subscribed within ~1 s. Works for the per-message kinds above (not `[map]`, which is single-topic).
 - Per-topic QoS overrides via `[<kind>.qos."<topic>"]`: `reliability`, `durability`, `depth`.
 - Visual style per kind (`arrow`, `paths.style`, `scans.style`, `points.style`).
@@ -130,21 +162,9 @@ style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
 | `app`           | binary: window, event loop, egui shell, CLI                |
 | `renderer`      | wgpu pipelines, render passes, camera                      |
 | `scene`         | scene graph, scene primitives, dirty tracking              |
-| `mock_injector` | test harness that populates the scene without ROS2         |
-| `ros_node`      | r2r executor on a dedicated thread; per-message subscribers, TF tree, URDF loader, polled topic discovery |
-
-## Docker (release image)
-
-The root `Dockerfile` builds the binary and runs it.
-
-```sh
-docker build -t fastviz .
-xhost +SI:localuser:$(whoami)
-docker run --rm -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix fastviz --mock
-```
+| `ros_node`     | r2r executor on a dedicated thread; per-message subscribers, TF tree, URDF loader, polled topic discovery |
+| `mock_injector` | dev-only test harness that populates the scene without ROS2 |
 
 ## Status
 
-Milestone 0.5 features (TF, OccupancyGrid, PoseStamped, PoseArray, Path, LaserScan, PointCloud2, URDF + JointState with STL/OBJ/DAE meshes, TOML config with polled wildcard discovery and per-topic QoS) are complete. See [MBABYSTEPS_1.md](MBABYSTEPS_1.md) for the running plan and what's next.
-
-`--mock`, the cargo `mock` feature, and `--no-default-features --features mock` let you run/build without a live ROS2 install — useful for testing the rendering pipeline on hosts that don't have `/opt/ros`.
+Milestone 0.5 is complete: TF, OccupancyGrid, PoseStamped, PoseArray, Path, LaserScan, PointCloud2, URDF + JointState with STL/OBJ/DAE meshes, `visualization_msgs/Marker(Array)`, and TOML config with polled wildcard discovery + per-topic QoS. See [MBABYSTEPS_1.md](MBABYSTEPS_1.md) for the running plan.
