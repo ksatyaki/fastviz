@@ -18,6 +18,17 @@ pub const ROS_ID_POINTCLOUD_BASE: u64 = 2400; // PointCloud2 topics
 /// URDF link entities live at 3000.. (plan §3.1).
 pub const URDF_LINK_BASE: u64 = 3000;
 
+/// `visualization_msgs/Marker` entities. Each topic gets a 100_000-wide slab;
+/// within a slab, every (ns, id) pair from a publisher is mapped to a unique
+/// EntityId allocated sequentially as it first appears.
+pub const ROS_ID_MARKER_BASE: u64 = 4_000_000;
+pub const ROS_ID_MARKER_PER_TOPIC: u64 = 100_000;
+
+/// Compute the base EntityId for a marker topic (the first slot in its slab).
+pub fn marker_topic_base(topic_index: usize) -> u64 {
+    ROS_ID_MARKER_BASE + (topic_index as u64) * ROS_ID_MARKER_PER_TOPIC
+}
+
 /// TF-frame axis indicators live above the URDF range. Each frame in the TF
 /// tree is materialised as a `ScenePrimitive::Frame` entity with a stable id
 /// allocated in encounter order from this base.

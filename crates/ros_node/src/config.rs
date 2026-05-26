@@ -41,6 +41,10 @@ pub struct RosConfig {
     /// Topics carrying `sensor_msgs/PointCloud2`. Each gets one Points entity.
     pub point_topics: Vec<String>,
     pub point_style: PointCloudStyle,
+    /// Topics carrying `visualization_msgs/Marker`.
+    pub marker_topics: Vec<String>,
+    /// Topics carrying `visualization_msgs/MarkerArray`.
+    pub marker_array_topics: Vec<String>,
     /// Optional URDF file. When `Some`, the node loads it at startup and
     /// updates link transforms from `joint_states_topic`.
     pub urdf_path: Option<std::path::PathBuf>,
@@ -65,6 +69,8 @@ pub struct RosConfig {
     pub path_qos: HashMap<String, QosOverride>,
     pub scan_qos: HashMap<String, QosOverride>,
     pub point_qos: HashMap<String, QosOverride>,
+    pub marker_qos: HashMap<String, QosOverride>,
+    pub marker_array_qos: HashMap<String, QosOverride>,
     pub joint_states_qos: Option<QosOverride>,
     /// Side-panel grouping. Each group renders as a collapsible egui section
     /// in the order it appears here. Empty = current flat list behavior.
@@ -216,6 +222,8 @@ impl Default for RosConfig {
             scan_style: ScanStyle::default(),
             point_topics: Vec::new(),
             point_style: PointCloudStyle::default(),
+            marker_topics: Vec::new(),
+            marker_array_topics: Vec::new(),
             urdf_path: None,
             urdf_topic: None,
             urdf_topic_qos: None,
@@ -230,6 +238,8 @@ impl Default for RosConfig {
             path_qos: HashMap::new(),
             scan_qos: HashMap::new(),
             point_qos: HashMap::new(),
+            marker_qos: HashMap::new(),
+            marker_array_qos: HashMap::new(),
             joint_states_qos: None,
             ui_groups: Vec::new(),
         }
@@ -265,6 +275,8 @@ pub struct RawConfig {
     pub paths: Option<RawPaths>,
     pub scans: Option<RawScans>,
     pub points: Option<RawPoints>,
+    pub markers: Option<RawTopics>,
+    pub marker_arrays: Option<RawTopics>,
     pub urdf: Option<RawUrdf>,
     pub tf: Option<RawTf>,
     pub ui: Option<RawUi>,
@@ -410,6 +422,8 @@ impl RawConfig {
             paths,
             scans,
             points,
+            markers,
+            marker_arrays,
             urdf,
             tf,
             ui,
@@ -475,6 +489,14 @@ impl RawConfig {
                 (p.topics, style, p.qos)
             }
             None => (d.point_topics, d.point_style, d.point_qos),
+        };
+        let (marker_topics, marker_qos) = match markers {
+            Some(m) => (m.topics, m.qos),
+            None => (d.marker_topics, d.marker_qos),
+        };
+        let (marker_array_topics, marker_array_qos) = match marker_arrays {
+            Some(m) => (m.topics, m.qos),
+            None => (d.marker_array_topics, d.marker_array_qos),
         };
 
         let (urdf_path, urdf_topic, urdf_topic_qos, joint_states_topic, joint_states_qos) =
@@ -542,6 +564,8 @@ impl RawConfig {
             scan_style,
             point_topics,
             point_style,
+            marker_topics,
+            marker_array_topics,
             urdf_path,
             urdf_topic,
             urdf_topic_qos,
@@ -556,6 +580,8 @@ impl RawConfig {
             path_qos,
             scan_qos,
             point_qos,
+            marker_qos,
+            marker_array_qos,
             joint_states_qos,
             ui_groups,
         }

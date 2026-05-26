@@ -215,6 +215,8 @@ impl ApplicationHandler for App {
                 &cfg.path_topics,
                 &cfg.scan_topics,
                 &cfg.point_topics,
+                &cfg.marker_topics,
+                &cfg.marker_array_topics,
             ] {
                 for t in v.iter().filter(|t| t.as_str() != "*") {
                     active.push(t.clone());

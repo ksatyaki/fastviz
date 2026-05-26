@@ -488,7 +488,7 @@ fn recompute_normals(vertices: &mut [Vertex], indices: &[u32]) {
     }
 }
 
-fn box_mesh(sx: f32, sy: f32, sz: f32) -> (Vec<Vertex>, Vec<u32>) {
+pub(crate) fn box_mesh(sx: f32, sy: f32, sz: f32) -> (Vec<Vertex>, Vec<u32>) {
     let (hx, hy, hz) = (sx * 0.5, sy * 0.5, sz * 0.5);
     let faces: [[[f32; 3]; 5]; 6] = [
         // Each row: normal, then four corners.
@@ -516,7 +516,7 @@ fn box_mesh(sx: f32, sy: f32, sz: f32) -> (Vec<Vertex>, Vec<u32>) {
     (verts, idx)
 }
 
-fn cylinder_mesh(radius: f32, length: f32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+pub(crate) fn cylinder_mesh(radius: f32, length: f32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
     let half = length * 0.5;
     let segments = segments.max(3);
     let mut verts = Vec::new();
@@ -598,7 +598,7 @@ fn cylinder_mesh(radius: f32, length: f32, segments: u32) -> (Vec<Vertex>, Vec<u
     (verts, idx)
 }
 
-fn sphere_mesh(radius: f32, rings: u32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+pub(crate) fn sphere_mesh(radius: f32, rings: u32, segments: u32) -> (Vec<Vertex>, Vec<u32>) {
     let rings = rings.max(2);
     let segments = segments.max(3);
     let mut verts = Vec::new();

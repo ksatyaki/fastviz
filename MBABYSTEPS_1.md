@@ -6,7 +6,7 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 
 ---
 
-## 0. Progress (as of 2026-05-11)
+## 0. Progress (as of 2026-05-26)
 
 | Step | What | Status |
 |---|---|---|
@@ -22,6 +22,7 @@ the M0→M0.5 hand-off conversation so we don't have to re-debate them.
 | H.1 | PC2 received-vs-displayed counter | ✅ done |
 | H.2 | PointPass perf: revision-cached, GPU-side transform, buffer reuse | ✅ done |
 | I (0.5.7) | URDF + JointState → meshes + FK | ✅ done |
+| J | `visualization_msgs/Marker` + `MarkerArray` → primitives | ✅ done (2026-05-26) |
 
 ---
 
@@ -82,6 +83,7 @@ ros2 run joint_state_publisher_gui joint_state_publisher_gui
 | `1000..=1999` | ROS singletons (TF frames hash into this, occupancy=1000, etc.) |
 | `2000..=2999` | per-topic poses/paths/scans/pointclouds (allocate sequentially as topics arrive) |
 | `3000..=3999` | URDF link entities |
+| `4_000_000..` | `visualization_msgs/Marker` entities — 100k-wide slab per marker topic; each `(ns, id)` from the publisher gets one slot, allocated on first sight (see `ids::marker_topic_base`). |
 
 ### 3.2 Reference frame
 
@@ -95,9 +97,75 @@ Every entity should be created with `with_label(topic_name_or_link_name)` so the
 
 ## 4. Things explicitly out of scope for M0.5
 
-- `MarkerArray`, `Image`, `Imu`, `Odometry` → milestones 1–4.
+- `Image`, `Imu`, `Odometry` → milestones 1–4.
 - MCAP record/playback → M5.
 - Plugin system → M4.
 - Any rclrs work.
 - Wayland-native windowing.
 - TF interpolation (added only if jitter is visible).
+
+---
+
+## 5. Step J — `visualization_msgs/Marker` (done 2026-05-26)
+
+Pulled forward from M1 because it's a single-message subscriber and the
+existing primitive set already covers most marker shapes. Added:
+
+- `crates/ros_node/src/subscribers/marker.rs` — subscribes to either
+  `visualization_msgs/Marker` or `visualization_msgs/MarkerArray` per
+  configured topic.
+- Per-topic state: `(ns, id) → EntityId` allocator inside a 100k-wide slab
+  starting at `ids::ROS_ID_MARKER_BASE = 4_000_000`. `DELETE` removes one
+  entity; `DELETEALL` clears every entity owned by that topic.
+- TF integration: each marker is registered with `TfRegistry`, so late
+  `/tf` arrivals retroactively reposition it (same mechanism scans and
+  point clouds already use).
+- Config schema additions (TOML):
+  - `[markers]` — `topics = [...]`, optional `[markers.qos."/foo"]` per-topic QoS.
+  - `[marker_arrays]` — same shape, for `MarkerArray`-typed topics.
+- Wildcard `"*"` works in both sections, going through the existing
+  `subscribers::discovery::tick` poll path.
+- `config_writer` gained `TopicKind::Marker` / `MarkerArray` so the
+  Save-config window can emit `[markers]` / `[marker_arrays]` sections
+  from selected topics.
+
+**Marker-type coverage:**
+
+| `Marker.type_` | Mapping |
+|---|---|
+| `ARROW` (0) | `ScenePrimitive::Arrows`. Both forms supported: position-and-scale, and the two-point `points[0..2]` form. |
+| `CUBE` (1) | `Mesh` via `urdf::box_mesh` with `scale.xyz` as side lengths. |
+| `SPHERE` (2) | `Mesh` via a unit sphere whose vertices are scaled to `scale/2` per axis (ellipsoid). |
+| `CYLINDER` (3) | `Mesh` via `urdf::cylinder_mesh` (radius = `max(sx, sy)/2`, height = `sz`). |
+| `LINE_STRIP` (4) | `Polyline` with width = `scale.x`. |
+| `CUBE_LIST` (6), `SPHERE_LIST` (7), `POINTS` (8) | `Points`; per-point colors preserved when `colors[]` is populated. |
+| `TEXT_VIEW_FACING` (9) | `Labels` at the marker pose; height = `scale.z`. |
+| `TRIANGLE_LIST` (11) | `Mesh` built from `points[]` in triples with per-triangle flat normals. |
+| `LINE_LIST` (5), `MESH_RESOURCE` (10), `ARROW_STRIP` (12) | Logged once per topic; skipped. (M1+.) |
+
+**Out of scope inside Step J:**
+
+- Per-vertex colors for `LINE_STRIP` (`colors[]` array on a polyline) — only
+  the marker's flat color is used. Renderer's `LinePass` doesn't take
+  per-vertex color attributes yet.
+- `MESH_RESOURCE` mesh loading — would re-share URDF's `mesh-loader` code
+  path but needs a different `package://` resolution context. Punted.
+- Lifetime expiry. Markers stay until DELETE/DELETEALL or the topic
+  re-publishes the same `(ns, id)`.
+- Frame-locked vs. message-time semantics: every marker is treated as
+  frame-locked (re-resolved through TF on each refresh).
+
+**Smoke test from the devcontainer:**
+
+```bash
+# Publisher side:
+ros2 topic pub /visualization_marker visualization_msgs/msg/Marker \
+  "{header: {frame_id: 'map'}, ns: 'demo', id: 0, type: 1, action: 0, \
+    pose: {position: {x: 1.0, y: 0.0, z: 0.5}, orientation: {w: 1.0}}, \
+    scale: {x: 0.4, y: 0.4, z: 0.4}, color: {r: 1.0, g: 0.5, b: 0.0, a: 1.0}}" -r 1
+
+# Viz side (fastviz config snippet):
+# [markers]
+# topics = ["/visualization_marker"]
+```
+

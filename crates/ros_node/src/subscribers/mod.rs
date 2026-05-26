@@ -3,6 +3,7 @@
 pub mod discovery;
 pub mod jointstate;
 pub mod laserscan;
+pub mod marker;
 pub mod occupancy;
 pub mod path;
 pub mod pointcloud;

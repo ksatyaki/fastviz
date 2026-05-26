@@ -6,7 +6,7 @@
 
 use scene::SceneGraph;
 
-use crate::subscribers::{laserscan, occupancy, path, pointcloud, pose};
+use crate::subscribers::{laserscan, marker, occupancy, path, pointcloud, pose};
 
 /// Plain-data representation of a UI group passed in for saving. Decouples the
 /// writer from the egui-dependent runtime type in the app crate.
@@ -28,6 +28,8 @@ pub enum TopicKind {
     Path,
     Scan,
     PointCloud,
+    Marker,
+    MarkerArray,
 }
 
 impl TopicKind {
@@ -44,6 +46,8 @@ impl TopicKind {
             path::MSG_TYPE => Some(Self::Path),
             laserscan::MSG_TYPE => Some(Self::Scan),
             pointcloud::MSG_TYPE => Some(Self::PointCloud),
+            marker::MARKER_TYPE => Some(Self::Marker),
+            marker::ARRAY_TYPE => Some(Self::MarkerArray),
             _ => None,
         }
     }
@@ -56,6 +60,8 @@ impl TopicKind {
             Self::Path => "Path",
             Self::Scan => "LaserScan",
             Self::PointCloud => "PointCloud2",
+            Self::Marker => "Marker",
+            Self::MarkerArray => "MarkerArray",
         }
     }
 }
@@ -79,6 +85,8 @@ pub fn to_toml(
     let mut paths: Vec<String> = Vec::new();
     let mut scans: Vec<String> = Vec::new();
     let mut points: Vec<String> = Vec::new();
+    let mut markers: Vec<String> = Vec::new();
+    let mut marker_arrays: Vec<String> = Vec::new();
 
     for (topic, types) in topics {
         if !want.contains(topic.as_str()) {
@@ -96,6 +104,8 @@ pub fn to_toml(
             Some(TopicKind::Path) => paths.push(topic.clone()),
             Some(TopicKind::Scan) => scans.push(topic.clone()),
             Some(TopicKind::PointCloud) => points.push(topic.clone()),
+            Some(TopicKind::Marker) => markers.push(topic.clone()),
+            Some(TopicKind::MarkerArray) => marker_arrays.push(topic.clone()),
             None => {}
         }
     }
@@ -131,6 +141,17 @@ pub fn to_toml(
         out.push_str("[points]\n");
         out.push_str(&format!("topics = [{}]\n\n", toml_string_list(&points)));
     }
+    if !markers.is_empty() {
+        out.push_str("[markers]\n");
+        out.push_str(&format!("topics = [{}]\n\n", toml_string_list(&markers)));
+    }
+    if !marker_arrays.is_empty() {
+        out.push_str("[marker_arrays]\n");
+        out.push_str(&format!(
+            "topics = [{}]\n\n",
+            toml_string_list(&marker_arrays)
+        ));
+    }
     out
 }
 
@@ -158,6 +179,8 @@ pub fn to_toml_full(
     let mut paths: Vec<String> = Vec::new();
     let mut scans: Vec<String> = Vec::new();
     let mut points: Vec<String> = Vec::new();
+    let mut markers: Vec<String> = Vec::new();
+    let mut marker_arrays: Vec<String> = Vec::new();
 
     for (topic, types) in topics {
         if !want.contains(topic.as_str()) {
@@ -174,6 +197,8 @@ pub fn to_toml_full(
             Some(TopicKind::Path) => paths.push(topic.clone()),
             Some(TopicKind::Scan) => scans.push(topic.clone()),
             Some(TopicKind::PointCloud) => points.push(topic.clone()),
+            Some(TopicKind::Marker) => markers.push(topic.clone()),
+            Some(TopicKind::MarkerArray) => marker_arrays.push(topic.clone()),
             None => {}
         }
     }
@@ -240,6 +265,17 @@ pub fn to_toml_full(
             ));
         }
         out.push('\n');
+    }
+    if !markers.is_empty() {
+        out.push_str("[markers]\n");
+        out.push_str(&format!("topics = [{}]\n\n", toml_string_list(&markers)));
+    }
+    if !marker_arrays.is_empty() {
+        out.push_str("[marker_arrays]\n");
+        out.push_str(&format!(
+            "topics = [{}]\n\n",
+            toml_string_list(&marker_arrays)
+        ));
     }
 
     for g in ui_groups {
