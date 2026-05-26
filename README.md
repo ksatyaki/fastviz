@@ -6,16 +6,15 @@ A Rust-based ROS2 visualizer built on `wgpu` + `egui`. RViz alternative.
 
 ### Prebuilt release (Linux x86_64)
 
-Each tagged release publishes Ubuntu 22.04 / ROS Humble and Ubuntu 24.04 / ROS Jazzy artifacts on the [Releases page](../../releases) — both as a tarball and as a `.deb`.
+Each tagged release publishes Ubuntu 24.04 / ROS Jazzy artifacts on the [Releases page](../../releases) — both as a tarball and as a `.deb`.
 
 #### Option A — .deb (recommended)
 
-The `.deb` declares all runtime dependencies, including the ROS message packages and Vulkan loader, so `apt` pulls them in for you. Pick the file that matches your distro:
+The `.deb` declares all runtime dependencies, including the ROS message packages and Vulkan loader, so `apt` pulls them in for you:
 
-| OS                  | Asset                                            |
-| ------------------- | ------------------------------------------------ |
-| Ubuntu 22.04 / Humble | `fastviz-humble_<version>-1_amd64.deb`         |
-| Ubuntu 24.04 / Jazzy  | `fastviz-jazzy_<version>-1_amd64.deb`          |
+| OS                   | Asset                                   |
+| -------------------- | --------------------------------------- |
+| Ubuntu 24.04 / Jazzy | `fastviz-jazzy_<version>-1_amd64.deb`   |
 
 ```sh
 curl -LO "https://github.com/OWNER/REPO/releases/latest/download/fastviz-jazzy_<version>-1_amd64.deb"
@@ -29,7 +28,6 @@ The installed binary has the ROS lib directory baked into its rpath, so you do *
 
 ```sh
 tag=$(curl -s https://api.github.com/repos/OWNER/REPO/releases/latest | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
-# pick `noble-jazzy` or `jammy-humble`
 asset="app-${tag}-x86_64-unknown-linux-gnu-noble-jazzy.tar.gz"
 curl -L -o fastviz.tar.gz "https://github.com/OWNER/REPO/releases/download/${tag}/${asset}"
 tar -xzf fastviz.tar.gz
@@ -42,8 +40,8 @@ Replace `OWNER/REPO` with the repo slug (or just download the asset from the Rel
 
 The release binary is dynamically linked. On the host you'll need:
 
-- **ROS2 Humble** (Ubuntu 22.04) or **ROS2 Jazzy** (Ubuntu 24.04) — pick the artifact that matches. Other distros are untested.
-- ROS2 message packages used by the subscribers (substitute `humble` for `jazzy` on 22.04):
+- **ROS2 Jazzy** (Ubuntu 24.04). Other distros are untested.
+- ROS2 message packages used by the subscribers:
   ```sh
   sudo apt-get install -y \
     ros-jazzy-tf2-msgs ros-jazzy-nav-msgs ros-jazzy-sensor-msgs \

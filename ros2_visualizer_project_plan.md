@@ -17,7 +17,7 @@ A standalone, open source ROS2 visualizer that:
 - Works **natively inside Docker containers** with X11/Wayland passthrough
 - Supports the full breadth of common ROS2 data types
 - Is **extensible** — custom message types and plugins from day one
-- Targets **Humble + Jazzy** (the two active LTS releases); Jazzy is the dev default
+- Targets **Jazzy** (Ubuntu 24.04 LTS)
 
 ---
 

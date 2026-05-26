@@ -33,11 +33,9 @@ anyhow = { workspace = true }
 name = "app"
 path = "src/main.rs"
 
-# Debian packaging via `cargo-deb`. One .deb is produced per ROS distro because
-# the message packages and underlying Ubuntu release differ.
+# Debian packaging via `cargo-deb`. One .deb is produced per ROS distro.
 #
-#   cargo deb -p app --variant humble --no-build   # Ubuntu 22.04 / ROS Humble
-#   cargo deb -p app --variant jazzy  --no-build   # Ubuntu 24.04 / ROS Jazzy
+#   cargo deb -p app --variant jazzy --no-build   # Ubuntu 24.04 / ROS Jazzy
 #
 # Asset paths are resolved relative to this manifest, except `target/release/app`
 # which cargo-deb pulls from the workspace target dir.
@@ -59,10 +57,6 @@ assets = [
     ["../../configs/turtlebot4.toml", "usr/share/fastviz/configs/turtlebot4.toml", "644"],
     ["../../README.md", "usr/share/doc/fastviz/README.md", "644"],
 ]
-
-[package.metadata.deb.variants.humble]
-name = "fastviz-humble"
-depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-humble-tf2-msgs, ros-humble-nav-msgs, ros-humble-sensor-msgs, ros-humble-geometry-msgs, ros-humble-visualization-msgs"
 
 [package.metadata.deb.variants.jazzy]
 name = "fastviz-jazzy"
