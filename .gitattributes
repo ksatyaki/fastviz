@@ -1,3 +1,4 @@
 Screenshot.png filter=lfs diff=lfs merge=lfs -text
 LOGO.png filter=lfs diff=lfs merge=lfs -text
 ICON.png filter=lfs diff=lfs merge=lfs -text
+icons filter=lfs diff=lfs merge=lfs -text
