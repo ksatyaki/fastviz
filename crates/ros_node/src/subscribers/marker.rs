@@ -14,6 +14,7 @@
 //! `ARROW_STRIP`, `MESH_RESOURCE` log a one-time warning per topic.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -67,6 +68,11 @@ struct TopicState {
     slab_base: u64,
     next_slot: u64,
     entities: HashMap<(String, i32), EntityId>,
+    /// Hash of the last *payload* we accepted for each (ns, id). Bumped only
+    /// when the marker's render-relevant fields change; world transform is
+    /// deliberately excluded (TF motion is handled by `tf_refresh`, not by
+    /// re-upserting the entity).
+    last_payload_hash: HashMap<(String, i32), u64>,
     warned_unsupported: std::collections::HashSet<i32>,
 }
 
@@ -76,6 +82,7 @@ impl TopicState {
             slab_base,
             next_slot: 0,
             entities: HashMap::new(),
+            last_payload_hash: HashMap::new(),
             warned_unsupported: std::collections::HashSet::new(),
         }
     }
@@ -95,8 +102,49 @@ impl TopicState {
     }
 
     fn remove(&mut self, ns: &str, id: i32) -> Option<EntityId> {
+        self.last_payload_hash.remove(&(ns.to_string(), id));
         self.entities.remove(&(ns.to_string(), id))
     }
+}
+
+/// Hash of the render-relevant marker fields. Excludes `header.stamp` (often
+/// `now()` even on identical content) and the looked-up world transform (TF
+/// changes are dispatched via `tf_refresh`, not by re-upserting the entity).
+fn payload_hash(m: &Marker) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    m.type_.hash(&mut h);
+    m.action.hash(&mut h);
+    m.header.frame_id.hash(&mut h);
+    let p = &m.pose;
+    p.position.x.to_bits().hash(&mut h);
+    p.position.y.to_bits().hash(&mut h);
+    p.position.z.to_bits().hash(&mut h);
+    p.orientation.x.to_bits().hash(&mut h);
+    p.orientation.y.to_bits().hash(&mut h);
+    p.orientation.z.to_bits().hash(&mut h);
+    p.orientation.w.to_bits().hash(&mut h);
+    m.scale.x.to_bits().hash(&mut h);
+    m.scale.y.to_bits().hash(&mut h);
+    m.scale.z.to_bits().hash(&mut h);
+    m.color.r.to_bits().hash(&mut h);
+    m.color.g.to_bits().hash(&mut h);
+    m.color.b.to_bits().hash(&mut h);
+    m.color.a.to_bits().hash(&mut h);
+    m.text.hash(&mut h);
+    (m.points.len() as u64).hash(&mut h);
+    for pt in &m.points {
+        pt.x.to_bits().hash(&mut h);
+        pt.y.to_bits().hash(&mut h);
+        pt.z.to_bits().hash(&mut h);
+    }
+    (m.colors.len() as u64).hash(&mut h);
+    for c in &m.colors {
+        c.r.to_bits().hash(&mut h);
+        c.g.to_bits().hash(&mut h);
+        c.b.to_bits().hash(&mut h);
+        c.a.to_bits().hash(&mut h);
+    }
+    h.finish()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -136,8 +184,8 @@ pub fn spawn_marker_topic(
                     );
                     first = false;
                 }
-                process_marker(
-                    &msg,
+                process_marker_batch(
+                    std::slice::from_ref(&msg),
                     &topic,
                     &reference_frame,
                     &tf,
@@ -182,17 +230,36 @@ pub fn spawn_marker_array_topic(
                     log::info!("{topic}: first MarkerArray ({} markers)", msg.markers.len());
                     first = false;
                 }
-                for m in &msg.markers {
-                    process_marker(m, &topic, &reference_frame, &tf, &tf_refresh, &scene, &state);
-                }
+                process_marker_batch(
+                    &msg.markers,
+                    &topic,
+                    &reference_frame,
+                    &tf,
+                    &tf_refresh,
+                    &scene,
+                    &state,
+                );
             }
         })
         .context("spawning MarkerArray subscriber task")?;
     Ok(())
 }
 
-fn process_marker(
-    m: &Marker,
+/// Pending TF refresh registration accumulated while building entities; flushed
+/// after the scene write lock is released so we don't hold both locks longer
+/// than necessary.
+struct PendingTfReg {
+    eid: EntityId,
+    frame: String,
+    pose_local: Mat4,
+}
+
+/// Process a batch of markers under a single scene write lock and a single
+/// topic-state lock. Markers may arrive at high rate (e.g. nav plans at 30 Hz
+/// with hundreds of markers); per-message locking would thrash against the
+/// renderer's read lock.
+fn process_marker_batch(
+    markers: &[Marker],
     topic: &str,
     reference_frame: &str,
     tf: &TfTree,
@@ -200,88 +267,132 @@ fn process_marker(
     scene: &SceneHandle,
     state: &Arc<Mutex<TopicState>>,
 ) {
-    match m.action {
-        A_DELETE => {
-            let eid = state.lock().remove(&m.ns, m.id);
-            if let Some(eid) = eid {
-                scene.write().remove(eid);
-                tf_refresh.unregister(eid);
+    if markers.is_empty() {
+        return;
+    }
+
+    // Build everything we need under the state lock first (allocations, hash
+    // checks, primitive construction). Then acquire the scene write lock once
+    // to apply removes + upserts. TF registration is deferred to after both
+    // locks release.
+    let mut to_remove: Vec<EntityId> = Vec::new();
+    let mut to_upsert: Vec<SceneEntity> = Vec::new();
+    let mut to_register: Vec<PendingTfReg> = Vec::new();
+    let mut to_unregister: Vec<EntityId> = Vec::new();
+
+    {
+        let mut s = state.lock();
+        for m in markers {
+            match m.action {
+                A_DELETE => {
+                    if let Some(eid) = s.remove(&m.ns, m.id) {
+                        to_remove.push(eid);
+                        to_unregister.push(eid);
+                    }
+                    continue;
+                }
+                A_DELETEALL => {
+                    let ids: Vec<EntityId> = s.entities.values().copied().collect();
+                    s.entities.clear();
+                    s.last_payload_hash.clear();
+                    for eid in &ids {
+                        to_remove.push(*eid);
+                        to_unregister.push(*eid);
+                    }
+                    continue;
+                }
+                A_ADD => {} // == A_MODIFY
+                other => {
+                    log::warn!("{topic}: unknown marker action {other}, treating as ADD");
+                }
             }
-            return;
-        }
-        A_DELETEALL => {
-            let entities: Vec<EntityId> = {
-                let mut s = state.lock();
-                let ids: Vec<EntityId> = s.entities.values().copied().collect();
-                s.entities.clear();
-                // Keep next_slot — preserve stable slots if publisher re-uses ids.
-                ids
+
+            // Skip identical re-publishes: avoids bumping entity revision and
+            // re-uploading GPU buffers for content we already have. TF motion
+            // is handled separately by `tf_refresh`.
+            let hash = payload_hash(m);
+            let key = (m.ns.clone(), m.id);
+            if s.last_payload_hash.get(&key) == Some(&hash) {
+                continue;
+            }
+
+            let primitive = match build_primitive_locked(m, topic, &mut s) {
+                Some(p) => p,
+                None => continue,
             };
-            let mut sw = scene.write();
-            for eid in &entities {
-                sw.remove(*eid);
-                tf_refresh.unregister(*eid);
-            }
-            return;
-        }
-        A_ADD => {} // == A_MODIFY
-        other => {
-            log::warn!("{topic}: unknown marker action {other}, treating as ADD");
+
+            let eid = match s.allocate(&m.ns, m.id) {
+                Some(e) => e,
+                None => {
+                    log::warn!(
+                        "{topic}: marker slab full (>{} unique (ns,id) keys); dropping ns={} id={}",
+                        ROS_ID_MARKER_PER_TOPIC,
+                        m.ns,
+                        m.id
+                    );
+                    continue;
+                }
+            };
+
+            let frame = &m.header.frame_id;
+            let pose_local = pose_to_mat4(&m.pose);
+            let tf_ref_from_frame = if frame == reference_frame {
+                Mat4::IDENTITY
+            } else {
+                match tf.lookup(reference_frame, frame) {
+                    Some(x) => x,
+                    None => {
+                        log::warn!(
+                            "{topic}: tf lookup {frame} -> {reference_frame} unavailable; rendering marker ns={} id={} at frame origin",
+                            m.ns,
+                            m.id
+                        );
+                        Mat4::IDENTITY
+                    }
+                }
+            };
+            let transform = ROS_TO_WORLD * tf_ref_from_frame * pose_local;
+
+            let label = if m.ns.is_empty() {
+                format!("{topic} [{}]", m.id)
+            } else {
+                format!("{topic} [{}/{}]", m.ns, m.id)
+            };
+            let entity = SceneEntity::new(eid, primitive)
+                .with_transform(transform)
+                .with_label(label);
+            to_upsert.push(entity);
+            to_register.push(PendingTfReg {
+                eid,
+                frame: frame.clone(),
+                pose_local,
+            });
+            s.last_payload_hash.insert(key, hash);
         }
     }
-    // ADD / MODIFY path.
-    let primitive = match build_primitive(m, topic, state) {
-        Some(p) => p,
-        None => return,
-    };
 
-    let eid = match state.lock().allocate(&m.ns, m.id) {
-        Some(e) => e,
-        None => {
-            log::warn!(
-                "{topic}: marker slab full (>{} unique (ns,id) keys); dropping ns={} id={}",
-                ROS_ID_MARKER_PER_TOPIC,
-                m.ns,
-                m.id
-            );
-            return;
+    if !to_remove.is_empty() || !to_upsert.is_empty() {
+        let mut sw = scene.write();
+        for eid in &to_remove {
+            sw.remove(*eid);
         }
-    };
-
-    let frame = &m.header.frame_id;
-    let pose_local = pose_to_mat4(&m.pose);
-    let tf_ref_from_frame = if frame == reference_frame {
-        Mat4::IDENTITY
-    } else {
-        match tf.lookup(reference_frame, frame) {
-            Some(x) => x,
-            None => {
-                log::warn!(
-                    "{topic}: tf lookup {frame} -> {reference_frame} unavailable; rendering marker ns={} id={} at frame origin",
-                    m.ns,
-                    m.id
-                );
-                Mat4::IDENTITY
-            }
+        for entity in to_upsert {
+            sw.upsert(entity);
         }
-    };
-    let transform = ROS_TO_WORLD * tf_ref_from_frame * pose_local;
+    }
 
-    let label = if m.ns.is_empty() {
-        format!("{topic} [{}]", m.id)
-    } else {
-        format!("{topic} [{}/{}]", m.ns, m.id)
-    };
-    let entity = SceneEntity::new(eid, primitive)
-        .with_transform(transform)
-        .with_label(label);
-    scene.write().upsert(entity);
-    tf_refresh.register(eid, frame.as_str(), pose_local);
+    for eid in to_unregister {
+        tf_refresh.unregister(eid);
+    }
+    for reg in to_register {
+        tf_refresh.register(reg.eid, reg.frame.as_str(), reg.pose_local);
+    }
 }
 
 /// Construct the `ScenePrimitive` for a marker, returning `None` if the type
-/// is unsupported (with a one-time warning per topic+type).
-fn build_primitive(m: &Marker, topic: &str, state: &Arc<Mutex<TopicState>>) -> Option<ScenePrimitive> {
+/// is unsupported (with a one-time warning per topic+type). Takes the already-
+/// held topic-state lock so we don't drop and re-acquire it mid-batch.
+fn build_primitive_locked(m: &Marker, topic: &str, state: &mut TopicState) -> Option<ScenePrimitive> {
     let color = ros_color(&m.color);
     let sx = m.scale.x as f32;
     let sy = m.scale.y as f32;
@@ -384,8 +495,7 @@ fn build_primitive(m: &Marker, topic: &str, state: &Arc<Mutex<TopicState>>) -> O
             }))
         }
         other => {
-            let mut s = state.lock();
-            if s.warned_unsupported.insert(other) {
+            if state.warned_unsupported.insert(other) {
                 let name = match other {
                     T_LINE_LIST => "LINE_LIST",
                     T_MESH_RESOURCE => "MESH_RESOURCE",

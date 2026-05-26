@@ -183,9 +183,15 @@ impl SceneGraph {
 
     /// Update the transform. Bumps revision so the renderer picks up the new
     /// value; the per-entity primitive payload doesn't change so the data
-    /// upload itself is unaffected.
+    /// upload itself is unaffected. No-op (and no revision bump) when the new
+    /// matrix is identical to the current one — `tf_refresh` calls this every
+    /// tick for every TF-bound entity, so an unconditional bump would defeat
+    /// every revision-keyed cache downstream (point pass especially).
     pub fn update_transform(&mut self, id: EntityId, transform: Mat4) {
         if let Some(e) = self.entities.get_mut(&id) {
+            if e.transform == transform {
+                return;
+            }
             e.transform = transform;
             self.revision += 1;
         }
@@ -193,6 +199,9 @@ impl SceneGraph {
 
     pub fn set_visible(&mut self, id: EntityId, visible: bool) {
         if let Some(e) = self.entities.get_mut(&id) {
+            if e.visible == visible {
+                return;
+            }
             e.visible = visible;
             self.revision += 1;
         }

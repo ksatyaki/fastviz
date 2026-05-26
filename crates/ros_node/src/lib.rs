@@ -21,6 +21,6 @@ pub use config::{RosConfig, UiGroup};
 pub use config_writer::{
     to_toml as config_to_toml, to_toml_full as config_to_toml_full, TopicKind, UiGroupSave,
 };
-pub use ids::{TF_FRAME_BASE, TF_FRAME_CAPACITY, URDF_LINK_BASE};
+pub use ids::{ROS_ID_MARKER_BASE, TF_FRAME_BASE, TF_FRAME_CAPACITY, URDF_LINK_BASE};
 pub use node::{RosNode, TopicsSnapshot};
 pub use stats::RosStats;

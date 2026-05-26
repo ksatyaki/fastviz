@@ -20,6 +20,124 @@ const TF_FRAME_BASE: u64 = u64::MAX;
 #[cfg(not(feature = "ros"))]
 const TF_FRAME_CAPACITY: u64 = 0;
 
+#[cfg(feature = "ros")]
+const MARKER_BASE: u64 = ros_node::ROS_ID_MARKER_BASE;
+#[cfg(not(feature = "ros"))]
+const MARKER_BASE: u64 = u64::MAX;
+
+fn is_marker_entity(id: EntityId) -> bool {
+    id.0 >= MARKER_BASE
+}
+
+/// Best-effort topic name for an entity, from its label. Returns `None` for
+/// entities whose label doesn't encode a topic (TF axes, URDF links, untitled).
+fn topic_for_entity(id: EntityId, label: Option<&str>) -> Option<&str> {
+    let label = label?;
+    // TF / URDF use non-topic labels; they're grouped separately.
+    let in_tf_range =
+        id.0 >= TF_FRAME_BASE && id.0 < TF_FRAME_BASE.saturating_add(TF_FRAME_CAPACITY);
+    let in_urdf_range =
+        id.0 >= URDF_LINK_BASE && id.0 < URDF_LINK_BASE.saturating_add(1_000_000);
+    if in_tf_range || in_urdf_range {
+        return None;
+    }
+    // Marker labels look like "topic [id]" or "topic [ns/id]". Other subscribers
+    // set the label to the topic name directly; occupancy uses "/map [frame]"
+    // which still leaves "/map" as the first whitespace token.
+    let head = label.split_whitespace().next().unwrap_or(label);
+    if head.is_empty() {
+        None
+    } else {
+        Some(head)
+    }
+}
+
+/// Parse a marker label of the form `"<topic> [<ns>/<id>]"` or
+/// `"<topic> [<id>]"`. Returns `(topic, ns_or_none, id_str)`.
+fn parse_marker_label(label: &str) -> Option<(&str, Option<&str>, &str)> {
+    let bracket_open = label.find(" [")?;
+    let topic = &label[..bracket_open];
+    let inside_start = bracket_open + 2;
+    let close_rel = label[inside_start..].rfind(']')?;
+    let inside = &label[inside_start..inside_start + close_rel];
+    if let Some(slash) = inside.find('/') {
+        Some((topic, Some(&inside[..slash]), &inside[slash + 1..]))
+    } else {
+        Some((topic, None, inside))
+    }
+}
+
+/// Tri-state for a bulk visibility checkbox over N entities: all visible, none
+/// visible, or mixed. The eye toggle uses this to drive a single click that
+/// flips everything to the opposite of the dominant state.
+#[derive(Copy, Clone, PartialEq)]
+enum BulkVis {
+    All,
+    None,
+    Mixed,
+}
+
+fn bulk_state<'a, I: IntoIterator<Item = &'a EntityId>>(
+    scene: &SceneGraph,
+    ids: I,
+) -> BulkVis {
+    let (mut all_on, mut all_off, mut empty) = (true, true, true);
+    for id in ids {
+        if let Some(e) = scene.entities.get(id) {
+            empty = false;
+            if e.visible {
+                all_off = false;
+            } else {
+                all_on = false;
+            }
+        }
+    }
+    if empty {
+        BulkVis::None
+    } else if all_on {
+        BulkVis::All
+    } else if all_off {
+        BulkVis::None
+    } else {
+        BulkVis::Mixed
+    }
+}
+
+fn set_bulk_visible(scene: &mut SceneGraph, ids: &[EntityId], visible: bool) {
+    for id in ids {
+        scene.set_visible(*id, visible);
+    }
+}
+
+/// Render the [eye] visibility toggle for a bucket of entities. Click flips
+/// to the opposite of the dominant state (All -> None, anything-else -> All).
+/// `salt` makes the egui id unique per call site so adjacent toggles don't
+/// share state.
+fn eye_toggle(
+    ui: &mut egui::Ui,
+    scene: &mut SceneGraph,
+    ids: &[EntityId],
+    salt: impl std::hash::Hash,
+) {
+    let state = bulk_state(scene, ids);
+    // ●/○/◐ are in egui's default font; "eye"-shaped emoji (👁) is often
+    // missing glyphs and renders as tofu. These are the closest unambiguous
+    // glyphs available without bundling extra fonts.
+    let (icon, hover) = match state {
+        BulkVis::All => ("\u{25CF}", "Visible \u{2014} click to hide"),
+        BulkVis::None => ("\u{25CB}", "Hidden \u{2014} click to show"),
+        BulkVis::Mixed => ("\u{25D0}", "Mixed \u{2014} click to show all"),
+    };
+    let btn = ui
+        .add(egui::Button::new(icon).small().frame(false))
+        .on_hover_text(hover);
+    if btn.clicked() {
+        let target = !matches!(state, BulkVis::All);
+        set_bulk_visible(scene, ids, target);
+    }
+    let _ = salt; // reserved for future egui memory keying
+}
+
 #[derive(Copy, Clone, Default)]
 pub struct Pc2Stats {
     pub received: u64,
@@ -247,9 +365,16 @@ pub fn draw(
                     if !groups.is_empty() {
                         ui.separator();
                     }
-                    for id in ungrouped {
-                        draw_entity_row(ui, scene, id, edit_state);
-                    }
+                    // Synthetic group for orphan entities. Collapsed by default
+                    // and topic-bucketed inside, same as the configured groups.
+                    let mut synth = UiGroupView {
+                        name: "Ungrouped".to_string(),
+                        topics: Vec::new(),
+                        urdf: false,
+                        tf: false,
+                        open: false,
+                    };
+                    draw_group(ui, scene, &mut synth, &ungrouped, edit_state, None);
                 }
             });
         });
@@ -440,17 +565,7 @@ fn draw_group(
     tf_axis_length: Option<&mut f32>,
 ) {
     ui.horizontal(|ui| {
-        // Group-level visibility: checked when every member is visible.
-        let all_visible = !members.is_empty() && members.iter().all(|id| scene.entities[id].visible);
-        let mut new_all = all_visible;
-        if ui
-            .add_enabled(!members.is_empty(), egui::Checkbox::new(&mut new_all, ""))
-            .changed()
-        {
-            for id in members {
-                scene.set_visible(*id, new_all);
-            }
-        }
+        eye_toggle(ui, scene, members, ("group_eye", group.name.as_str()));
         let header_label = format!("{}  ({})", group.name, members.len());
         let resp = egui::CollapsingHeader::new(header_label)
             .id_salt(("ui_group", group.name.as_str()))
@@ -473,29 +588,131 @@ fn draw_group(
                     });
                     ui.separator();
                 }
+
+                // TF frames don't have a parseable "topic" in their label
+                // (just "tf: <frame>"), so render them as a flat list under
+                // the group header without an extra collapser per frame.
+                if group.tf {
+                    for id in members {
+                        draw_entity_leaf(ui, scene, *id, edit_state);
+                    }
+                    return;
+                }
+
+                // Bucket members by topic. Entities without a topic label
+                // (URDF links, anything without a label) fall into `topicless`.
+                let mut by_topic: std::collections::BTreeMap<String, Vec<EntityId>> =
+                    std::collections::BTreeMap::new();
+                let mut topicless: Vec<EntityId> = Vec::new();
                 for id in members {
-                    draw_entity_row(ui, scene, *id, edit_state);
+                    let label = scene.entities.get(id).and_then(|e| e.label.as_deref());
+                    match topic_for_entity(*id, label) {
+                        Some(t) => by_topic.entry(t.to_string()).or_default().push(*id),
+                        None => topicless.push(*id),
+                    }
+                }
+                for (topic, ids) in &by_topic {
+                    draw_topic_bucket(ui, scene, topic, ids, edit_state);
+                }
+                for id in &topicless {
+                    draw_entity_leaf(ui, scene, *id, edit_state);
                 }
             });
         group.open = resp.openness > 0.5;
     });
 }
 
-fn draw_entity_row(
+/// One bucket per topic. Header is collapsed by default. If the bucket
+/// contains marker entities, sub-buckets by namespace (also collapsed).
+fn draw_topic_bucket(
+    ui: &mut egui::Ui,
+    scene: &mut SceneGraph,
+    topic: &str,
+    ids: &[EntityId],
+    edit_state: &mut EntityEditState,
+) {
+    ui.horizontal(|ui| {
+        eye_toggle(ui, scene, ids, ("topic_eye", topic));
+        egui::CollapsingHeader::new(format!("{topic}  ({})", ids.len()))
+            .id_salt(("topic", topic))
+            .default_open(false)
+            .show(ui, |ui| {
+                let any_marker = ids.iter().any(|id| is_marker_entity(*id));
+                if any_marker {
+                    let mut by_ns: std::collections::BTreeMap<String, Vec<EntityId>> =
+                        std::collections::BTreeMap::new();
+                    for id in ids {
+                        let label = scene
+                            .entities
+                            .get(id)
+                            .and_then(|e| e.label.as_deref())
+                            .unwrap_or("");
+                        let ns = parse_marker_label(label)
+                            .and_then(|(_, ns, _)| ns)
+                            .unwrap_or("");
+                        by_ns.entry(ns.to_string()).or_default().push(*id);
+                    }
+                    // If the only ns is the empty one, skip the ns layer and
+                    // render markers directly under the topic so the user
+                    // doesn't have to click through a single "(no ns)" header.
+                    if by_ns.len() == 1 && by_ns.contains_key("") {
+                        for id in ids {
+                            draw_entity_leaf(ui, scene, *id, edit_state);
+                        }
+                    } else {
+                        for (ns, ns_ids) in &by_ns {
+                            draw_ns_bucket(ui, scene, topic, ns, ns_ids, edit_state);
+                        }
+                    }
+                } else {
+                    for id in ids {
+                        draw_entity_leaf(ui, scene, *id, edit_state);
+                    }
+                }
+            });
+    });
+}
+
+fn draw_ns_bucket(
+    ui: &mut egui::Ui,
+    scene: &mut SceneGraph,
+    topic: &str,
+    ns: &str,
+    ids: &[EntityId],
+    edit_state: &mut EntityEditState,
+) {
+    let header = if ns.is_empty() {
+        format!("(no ns)  ({})", ids.len())
+    } else {
+        format!("{ns}  ({})", ids.len())
+    };
+    ui.horizontal(|ui| {
+        eye_toggle(ui, scene, ids, ("ns_eye", topic, ns));
+        egui::CollapsingHeader::new(header)
+            .id_salt(("ns", topic, ns))
+            .default_open(false)
+            .show(ui, |ui| {
+                for id in ids {
+                    draw_entity_leaf(ui, scene, *id, edit_state);
+                }
+            });
+    });
+}
+
+/// Leaf row for a single entity. The expander reveals the color/scale editor.
+fn draw_entity_leaf(
     ui: &mut egui::Ui,
     scene: &mut SceneGraph,
     id: EntityId,
     edit_state: &mut EntityEditState,
 ) {
-    // Clone the bits we need so we can keep `scene` mutable below.
-    let (display, kind, mut visible, current_color, current_scale, is_frame) =
+    let (display, kind, current_color, current_scale, is_frame) =
         match scene.entities.get(&id) {
             Some(e) => (
                 e.label
                     .clone()
                     .unwrap_or_else(|| format!("entity #{}", id.0)),
                 primitive_label(&e.primitive),
-                e.visible,
                 scene::primitive_color(&e.primitive),
                 scene::primitive_scale(&e.primitive),
                 matches!(e.primitive, ScenePrimitive::Frame(_)),
@@ -504,9 +721,7 @@ fn draw_entity_row(
         };
 
     ui.horizontal(|ui| {
-        if ui.checkbox(&mut visible, "").changed() {
-            scene.set_visible(id, visible);
-        }
+        eye_toggle(ui, scene, std::slice::from_ref(&id), ("entity_eye", id.0));
         let header_resp = egui::CollapsingHeader::new(format!("{display}  ({kind})"))
             .id_salt(("entity", id.0))
             .default_open(false)

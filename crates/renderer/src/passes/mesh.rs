@@ -43,6 +43,10 @@ pub struct MeshPass {
     fill_pipeline: wgpu::RenderPipeline,
     instance_bgl: wgpu::BindGroupLayout,
     meshes: HashMap<EntityId, GpuMesh>,
+    /// Scene revision the `meshes` map was last reconciled against. When the
+    /// revision hasn't moved we skip the whole prepare loop — neither
+    /// geometry uploads nor instance writes nor the membership scan.
+    last_revision: Option<u64>,
 }
 
 impl MeshPass {
@@ -126,10 +130,17 @@ impl MeshPass {
             fill_pipeline,
             instance_bgl,
             meshes: HashMap::new(),
+            last_revision: None,
         }
     }
 
     pub fn prepare(&mut self, gpu: &GpuContext, scene: &SceneGraph) {
+        let revision = scene.revision();
+        if self.last_revision == Some(revision) {
+            return;
+        }
+        self.last_revision = Some(revision);
+
         let mut seen: HashSet<EntityId> = HashSet::new();
 
         for entity in scene.entities.values() {

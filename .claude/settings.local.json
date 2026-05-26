@@ -37,7 +37,10 @@
       "Bash(cargo check *)",
       "Bash(timeout 5 ./target/debug/app --urdf /tmp/test-arm.urdf)",
       "Bash(echo \"exit=$?\")",
-      "Bash(RUST_LOG=info timeout 5 ./target/debug/app --urdf /tmp/test-arm.urdf)"
+      "Bash(RUST_LOG=info timeout 5 ./target/debug/app --urdf /tmp/test-arm.urdf)",
+      "Read(//opt/**)",
+      "Read(//home/ksatyaki/**)",
+      "Bash(find / -name \"setup.bash\" -path \"*ros*\")"
     ],
     "additionalDirectories": [
       "/tmp"
