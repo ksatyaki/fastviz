@@ -3,3 +3,4 @@
 Cargo.lock.bak
 .DS_Store
 indoor_easy_01
+.claude/settings.local.json
