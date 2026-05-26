@@ -3,6 +3,7 @@
 
 mod cli;
 mod egui_state;
+mod theme;
 mod ui;
 
 use std::sync::Arc;
@@ -49,6 +50,8 @@ struct AppContext {
     mock: Option<MockInjector>,
     #[cfg(feature = "ros")]
     ros: Option<ros_node::RosNode>,
+    /// Current theme (light/dark). Persisted across runs.
+    theme: theme::Mode,
     /// Side-panel grouping config. Empty = flat list.
     ui_groups: Vec<ui::UiGroupView>,
     /// Current TF axis length in meters (UI-driven). Mirrored into the ROS
@@ -170,6 +173,12 @@ impl ApplicationHandler for App {
             renderer.gpu.surface_config.format,
         );
 
+        // Bundled IBM Plex fonts + initial theme. Fonts are installed once;
+        // the theme toggle later only re-pushes a new Style.
+        theme::install_fonts(&egui.ctx);
+        let theme_mode = theme::load();
+        theme::apply(&egui.ctx, theme_mode);
+
         let scene = Arc::new(RwLock::new(SceneGraph::new(self.args.ref_frame.clone())));
         let mock = if self.args.mock {
             Some(MockInjector::new())
@@ -274,6 +283,7 @@ impl ApplicationHandler for App {
             mock,
             #[cfg(feature = "ros")]
             ros,
+            theme: theme_mode,
             ui_groups,
             tf_axis_length: initial_tf_scale,
             reference_frame,
@@ -455,7 +465,9 @@ impl AppContext {
             let discoverer = &mut self.discoverer;
             let edit_state = &mut self.edit_state;
             let follow = &mut self.follow_frame;
+            let theme_mode = &mut self.theme;
             self.egui.run_ui(&window, |egui_ctx| {
+                let before = *theme_mode;
                 let mut scene = scene.write();
                 ui::draw(
                     egui_ctx,
@@ -469,9 +481,14 @@ impl AppContext {
                     discoverer,
                     edit_state,
                     follow,
+                    theme_mode,
                     #[cfg(feature = "ros")]
                     topic_ctx,
                 );
+                if *theme_mode != before {
+                    theme::apply(egui_ctx, *theme_mode);
+                    theme::save(*theme_mode);
+                }
             })
         };
 

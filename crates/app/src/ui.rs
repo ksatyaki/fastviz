@@ -2,9 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use egui::{Align, Layout};
+use egui::{Align, Color32, FontFamily, FontId, Layout, RichText};
 use renderer::{FrameStats, OrbitCamera};
 use scene::{EntityId, ScenePrimitive, SceneGraph};
+
+use crate::theme;
 
 #[cfg(feature = "ros")]
 const URDF_LINK_BASE: u64 = ros_node::URDF_LINK_BASE;
@@ -109,33 +111,79 @@ fn set_bulk_visible(scene: &mut SceneGraph, ids: &[EntityId], visible: bool) {
     }
 }
 
-/// Render the [eye] visibility toggle for a bucket of entities. Click flips
+/// Render the eye visibility toggle for a bucket of entities. Click flips
 /// to the opposite of the dominant state (All -> None, anything-else -> All).
-/// `salt` makes the egui id unique per call site so adjacent toggles don't
-/// share state.
+/// The indicator is painted directly so it doesn't depend on font glyphs —
+/// previously we used ●/○/◐, but IBM Plex Sans renders U+25CF as a notdef
+/// square and egui's fallback chain doesn't override an existing glyph.
 fn eye_toggle(
     ui: &mut egui::Ui,
     scene: &mut SceneGraph,
     ids: &[EntityId],
     salt: impl std::hash::Hash,
 ) {
+    let _ = salt;
     let state = bulk_state(scene, ids);
-    // ●/○/◐ are in egui's default font; "eye"-shaped emoji (👁) is often
-    // missing glyphs and renders as tofu. These are the closest unambiguous
-    // glyphs available without bundling extra fonts.
-    let (icon, hover) = match state {
-        BulkVis::All => ("\u{25CF}", "Visible \u{2014} click to hide"),
-        BulkVis::None => ("\u{25CB}", "Hidden \u{2014} click to show"),
-        BulkVis::Mixed => ("\u{25D0}", "Mixed \u{2014} click to show all"),
+    let hover = match state {
+        BulkVis::All => "Visible \u{2014} click to hide",
+        BulkVis::None => "Hidden \u{2014} click to show",
+        BulkVis::Mixed => "Mixed \u{2014} click to show all",
     };
-    let btn = ui
-        .add(egui::Button::new(icon).small().frame(false))
-        .on_hover_text(hover);
-    if btn.clicked() {
+
+    let size = egui::vec2(22.0, ui.spacing().interact_size.y.max(18.0));
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let resp = resp.on_hover_text(hover);
+
+    let visuals = ui.style().interact(&resp);
+    let center = rect.center();
+    let painter = ui.painter();
+    let stroke_color = if resp.hovered() {
+        theme::accent()
+    } else {
+        visuals.fg_stroke.color
+    };
+    let stroke = egui::Stroke::new(1.4, stroke_color);
+
+    // Almond outline (eye shape): ellipse approximated by a closed polyline.
+    let hw = 8.5; // half-width
+    let hh = 4.5; // half-height
+    let segs = 24;
+    let outline: Vec<egui::Pos2> = (0..segs)
+        .map(|i| {
+            let t = (i as f32) / (segs as f32) * std::f32::consts::TAU;
+            egui::pos2(center.x + hw * t.cos(), center.y + hh * t.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::closed_line(outline, stroke));
+
+    match state {
+        BulkVis::All => {
+            // Iris + pupil — solid accent so "visible" reads at a glance.
+            painter.circle_filled(center, 3.0, theme::accent());
+            painter.circle_filled(center, 1.2, Color32::BLACK);
+        }
+        BulkVis::Mixed => {
+            painter.circle_stroke(center, 3.0, stroke);
+            painter.circle_filled(center, 1.2, stroke_color);
+        }
+        BulkVis::None => {
+            // Diagonal slash across the eye, classic "hidden" affordance.
+            let off = hw + 1.5;
+            let off_y = hh + 2.5;
+            painter.line_segment(
+                [
+                    egui::pos2(center.x - off, center.y + off_y),
+                    egui::pos2(center.x + off, center.y - off_y),
+                ],
+                stroke,
+            );
+        }
+    }
+
+    if resp.clicked() {
         let target = !matches!(state, BulkVis::All);
         set_bulk_visible(scene, ids, target);
     }
-    let _ = salt; // reserved for future egui memory keying
 }
 
 #[derive(Copy, Clone, Default)]
@@ -230,6 +278,7 @@ pub fn draw(
     discoverer: &mut TopicDiscovererState,
     edit_state: &mut EntityEditState,
     follow_frame: &mut Option<String>,
+    theme_mode: &mut theme::Mode,
     #[cfg(feature = "ros")] topic_ctx: Option<TopicDiscovererCtx<'_>>,
 ) {
     // Build the list of TF frames currently in the scene for the follow-frame
@@ -246,74 +295,111 @@ pub fn draw(
         .collect();
     available_frames.sort();
     available_frames.dedup();
-    egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading("fastviz");
-            ui.separator();
-            if ui.button("reset view (F)").clicked() {
-                camera.reset_default();
-            }
-            if ui.button("top (T)").clicked() {
-                camera.top_down();
-            }
-            if ui.button("side (S)").clicked() {
-                camera.side();
-            }
-            ui.separator();
-            ui.checkbox(show_reference_grid, "ref grid");
-            ui.separator();
-            ui.label("follow:");
-            let current = follow_frame.clone().unwrap_or_else(|| "(none)".to_string());
-            egui::ComboBox::from_id_salt("follow_frame_combo")
-                .selected_text(current)
-                .show_ui(ui, |ui| {
+    egui::TopBottomPanel::top("toolbar")
+        .exact_height(36.0)
+        .show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                // Brand mark — Plex Medium in accent. Logo art will replace
+                // this later; the typeset wordmark is the placeholder.
+                ui.label(
+                    RichText::new("FastViz")
+                        .font(FontId::new(18.0, FontFamily::Name("plex_sans_medium".into())))
+                        .color(theme::accent()),
+                );
+                ui.add_space(6.0);
+                ui.separator();
+                if ui.button("Reset view").on_hover_text("F").clicked() {
+                    camera.reset_default();
+                }
+                if ui.button("Top").on_hover_text("T").clicked() {
+                    camera.top_down();
+                }
+                if ui.button("Side").on_hover_text("S").clicked() {
+                    camera.side();
+                }
+                ui.separator();
+                ui.checkbox(show_reference_grid, "Grid");
+                ui.separator();
+                ui.label("Follow");
+                let current = follow_frame.clone().unwrap_or_else(|| "—".to_string());
+                egui::ComboBox::from_id_salt("follow_frame_combo")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(follow_frame.is_none(), "—")
+                            .clicked()
+                        {
+                            *follow_frame = None;
+                        }
+                        for name in &available_frames {
+                            let selected = follow_frame.as_deref() == Some(name.as_str());
+                            if ui.selectable_label(selected, name).clicked() {
+                                *follow_frame = Some(name.clone());
+                            }
+                        }
+                    });
+                #[cfg(feature = "ros")]
+                {
+                    ui.separator();
+                    if ui.button("Save config…").clicked() {
+                        discoverer.open = !discoverer.open;
+                    }
+                }
+                #[cfg(not(feature = "ros"))]
+                {
+                    let _ = &discoverer;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Theme toggle — sun in dark mode (click to go light),
+                    // moon in light mode. Unicode glyphs render via egui's
+                    // default emoji fallback fonts.
+                    let (icon, hover) = match *theme_mode {
+                        theme::Mode::Dark => ("\u{2600}", "Switch to light theme"),
+                        theme::Mode::Light => ("\u{263E}", "Switch to dark theme"),
+                    };
                     if ui
-                        .selectable_label(follow_frame.is_none(), "(none)")
+                        .add(egui::Button::new(RichText::new(icon).size(15.0)).frame(false))
+                        .on_hover_text(hover)
                         .clicked()
                     {
-                        *follow_frame = None;
+                        *theme_mode = theme_mode.toggled();
                     }
-                    for name in &available_frames {
-                        let selected = follow_frame.as_deref() == Some(name.as_str());
-                        if ui.selectable_label(selected, name).clicked() {
-                            *follow_frame = Some(name.clone());
-                        }
+                    ui.separator();
+                    let dt = stats.smoothed_frame_seconds;
+                    let fps = if dt > 1e-6 { 1.0 / dt } else { 0.0 };
+                    ui.label(
+                        RichText::new(format!("{fps:5.1} fps  {:.1} ms", dt * 1000.0))
+                            .monospace(),
+                    );
+                    if pc2.received > 0 {
+                        ui.separator();
+                        let dropped = pc2.received.saturating_sub(pc2.displayed);
+                        let pct = 100.0 * (dropped as f64) / (pc2.received as f64);
+                        ui.label(
+                            RichText::new(format!(
+                                "PC2 {}/{}  drop {pct:.1}%",
+                                pc2.displayed, pc2.received
+                            ))
+                            .monospace(),
+                        );
                     }
                 });
-            #[cfg(feature = "ros")]
-            {
-                ui.separator();
-                if ui.button("Save config…").clicked() {
-                    discoverer.open = !discoverer.open;
-                }
-            }
-            #[cfg(not(feature = "ros"))]
-            {
-                let _ = &discoverer;
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let dt = stats.smoothed_frame_seconds;
-                let fps = if dt > 1e-6 { 1.0 / dt } else { 0.0 };
-                ui.label(format!("{fps:6.1} fps  ({:.1} ms)", dt * 1000.0));
-                if pc2.received > 0 {
-                    ui.separator();
-                    let dropped = pc2.received.saturating_sub(pc2.displayed);
-                    let pct = 100.0 * (dropped as f64) / (pc2.received as f64);
-                    ui.label(format!(
-                        "PC2 {}/{}  drop {pct:.1}%",
-                        pc2.displayed, pc2.received
-                    ));
-                }
             });
         });
-    });
 
     egui::SidePanel::left("entities")
         .resizable(true)
         .default_width(260.0)
         .show(ctx, |ui| {
+            ui.add_space(4.0);
             ui.heading("Entities");
-            ui.label(format!("reference frame: {}", scene.reference_frame));
+            ui.label(
+                RichText::new(format!("reference frame · {}", scene.reference_frame))
+                    .small()
+                    .weak(),
+            );
+            ui.add_space(2.0);
             ui.separator();
 
             // Build a stable, sorted view of entity IDs once per frame.
