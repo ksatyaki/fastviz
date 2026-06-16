@@ -33,9 +33,14 @@ pub fn spawn(
 ) -> Result<()> {
     // Map publishers commonly use TRANSIENT_LOCAL (latched) durability, but ad-hoc
     // pubs may use VOLATILE. BestAvailable matches whatever the publisher offers.
+    #[cfg(not(ros_humble))]
+    let durability = DurabilityPolicy::BestAvailable;
+    #[cfg(ros_humble)]
+    let durability = DurabilityPolicy::TransientLocal;
+
     let mut qos = QosProfile::default()
         .keep_last(1)
-        .durability(DurabilityPolicy::BestAvailable);
+        .durability(durability);
     let topic = cfg.map_topic.clone();
     if let Some(o) = cfg.map_qos.get(&topic) {
         qos = o.apply(qos);

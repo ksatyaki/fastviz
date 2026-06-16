@@ -18,6 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ros: humble
+            codename: jammy
+            image: ros:humble-ros-base
           - ros: jazzy
             codename: noble
             image: ros:jazzy-ros-base

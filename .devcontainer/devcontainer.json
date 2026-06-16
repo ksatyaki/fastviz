@@ -11,8 +11,8 @@
 // docker-compose.yml and Mesa llvmpipe will be used.
 {
     "name": "fastviz dev (jazzy + vulkan)",
-    "dockerComposeFile": "docker-compose.yml",
-    "service": "fastviz",
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "jazzy",
     "workspaceFolder": "/workspaces/fastviz",
     "remoteUser": "dev",
 

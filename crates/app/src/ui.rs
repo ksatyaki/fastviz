@@ -304,7 +304,7 @@ pub fn draw(
                 // this later; the typeset wordmark is the placeholder.
                 ui.label(
                     RichText::new("FastViz")
-                        .font(FontId::new(18.0, FontFamily::Name("plex_sans_medium".into())))
+                        .font(FontId::new(18.0, FontFamily::Proportional))
                         .color(theme::accent()),
                 );
                 ui.add_space(6.0);

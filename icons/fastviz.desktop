@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=fastviz
+Comment=A Rust-based ROS2 visualizer
+Exec=fastviz
+Icon=fastviz
+Terminal=false
+Type=Application
+Categories=Graphics;Science;
+# Match the winit Wayland app_id / X11 WM_CLASS so the compositor associates
+# the running window with this entry (and thus its icon).
+StartupWMClass=fastviz

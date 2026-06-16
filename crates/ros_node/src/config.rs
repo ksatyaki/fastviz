@@ -124,7 +124,13 @@ impl QosOverride {
             base = match s.as_str() {
                 "volatile" => base.durability(DurabilityPolicy::Volatile),
                 "transient_local" => base.durability(DurabilityPolicy::TransientLocal),
+                #[cfg(not(ros_humble))]
                 "best_available" => base.durability(DurabilityPolicy::BestAvailable),
+                #[cfg(ros_humble)]
+                "best_available" => {
+                    log::warn!("'best_available' durability is not supported on ROS Humble; using 'transient_local' fallback.");
+                    base.durability(DurabilityPolicy::TransientLocal)
+                }
                 other => {
                     log::warn!("unknown qos.durability {other:?}; ignoring");
                     base

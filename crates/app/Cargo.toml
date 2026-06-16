@@ -28,6 +28,7 @@ pollster = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [[bin]]
 name = "app"
@@ -56,8 +57,14 @@ assets = [
     ["../../configs/simple.toml", "usr/share/fastviz/configs/simple.toml", "644"],
     ["../../configs/turtlebot4.toml", "usr/share/fastviz/configs/turtlebot4.toml", "644"],
     ["../../README.md", "usr/share/doc/fastviz/README.md", "644"],
+    ["../../icons/fastviz.desktop", "usr/share/applications/fastviz.desktop", "644"],
+    ["../../icons/fastviz_round_f_square_1024.png", "usr/share/icons/hicolor/1024x1024/apps/fastviz.png", "644"],
 ]
+
+[package.metadata.deb.variants.humble]
+name = "fastviz-humble"
+depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-humble-tf2-msgs, ros-humble-nav-msgs, ros-humble-sensor-msgs, ros-humble-geometry-msgs, ros-humble-visualization-msgs"
 
 [package.metadata.deb.variants.jazzy]
 name = "fastviz-jazzy"
-depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-jazzy-tf2-msgs, ros-jazzy-nav-msgs, ros-jazzy-sensor-msgs, ros-jazzy-geometry-msgs, ros-jazzy-visualization-msgs"
+depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-jazzy-tf2-msgs, ros-jazzy-nav-msgs, ros-jazzy-sensor-msgs, ros-jazzy-geometry-msgs, ros-jazzy-visualization-msgs"

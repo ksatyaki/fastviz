@@ -26,7 +26,7 @@ impl GpuContext {
         W: Into<wgpu::SurfaceTarget<'static>>,
     {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::PRIMARY),
             ..Default::default()
         });
 

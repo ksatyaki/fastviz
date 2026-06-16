@@ -1,4 +1,5 @@
-FROM ros:jazzy-ros-base
+ARG ROS_DISTRO=jazzy
+FROM ros:${ROS_DISTRO}-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -12,8 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sudo curl ca-certificates git vim less \
         build-essential pkg-config \
         clang libclang-dev \
-        libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-        libxkbcommon-dev libwayland-dev libssl-dev \
+        libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+        libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libssl-dev \
         libvulkan1 vulkan-tools mesa-vulkan-drivers \
         libgl1 libglu1-mesa libglvnd0 libegl1 \
         nodejs npm \
@@ -44,11 +45,11 @@ RUN mkdir -p /etc/vulkan/icd.d /usr/share/glvnd/egl_vendor.d \
 
 # ROS2 message packages we'll subscribe to in M0.5
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ros-jazzy-tf2-msgs \
-        ros-jazzy-nav-msgs \
-        ros-jazzy-sensor-msgs \
-        ros-jazzy-geometry-msgs \
-        ros-jazzy-visualization-msgs \
+        ros-${ROS_DISTRO}-tf2-msgs \
+        ros-${ROS_DISTRO}-nav-msgs \
+        ros-${ROS_DISTRO}-sensor-msgs \
+        ros-${ROS_DISTRO}-geometry-msgs \
+        ros-${ROS_DISTRO}-visualization-msgs \
     && rm -rf /var/lib/apt/lists/*
 
 # TurtleBot 4 simulator (Gazebo Harmonic + irobot_create_* pulled transitively).
@@ -56,17 +57,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # is third-party (Clearpath), so desktop-full would still need this apt line on
 # top — and ship RViz/demos/tutorials we don't need. xacro is required because
 # turtlebot4_description ships URDFs as .urdf.xacro.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ros-jazzy-turtlebot4-simulator \
-        ros-jazzy-turtlebot4-description \
-        ros-jazzy-xacro \
-    && rm -rf /var/lib/apt/lists/*
+RUN if [ "$ROS_DISTRO" = "jazzy" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ros-${ROS_DISTRO}-turtlebot4-simulator \
+            ros-${ROS_DISTRO}-turtlebot4-description \
+            ros-${ROS_DISTRO}-xacro \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Clearpath simulator + Nav2 demos (Husky A200 etc.)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ros-jazzy-clearpath-simulator \
-        ros-jazzy-clearpath-nav2-demos \
-    && rm -rf /var/lib/apt/lists/*
+RUN if [ "$ROS_DISTRO" = "jazzy" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            ros-${ROS_DISTRO}-clearpath-simulator \
+            ros-${ROS_DISTRO}-clearpath-nav2-demos \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 ARG USERNAME=dev
 ARG USER_UID=1000
@@ -93,19 +98,23 @@ ENV PATH=/home/${USERNAME}/.cargo/bin:${PATH}
 
 # Claude Code CLI so in-container sessions can resume from the mounted ~/.claude
 USER root
-RUN npm install -g @anthropic-ai/claude-code
+RUN if [ "$ROS_DISTRO" = "jazzy" ]; then \
+        npm install -g @anthropic-ai/claude-code; \
+    fi
 USER ${USERNAME}
 
 # Auto-source ROS2 in interactive shells; r2r needs LIBCLANG_PATH at build time.
-RUN echo 'source /opt/ros/jazzy/setup.bash' >> /home/${USERNAME}/.bashrc \
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /home/${USERNAME}/.bashrc \
  && echo 'export LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu' >> /home/${USERNAME}/.bashrc
 
 # Seed Clearpath robot config (Husky A200 + Velodyne sample) and clear its
 # namespace so topics publish at the root rather than under /a200_0000.
-RUN mkdir -p /home/${USERNAME}/clearpath \
- && cp /opt/ros/jazzy/share/clearpath_config/sample/a200_velodyne.yaml \
-       /home/${USERNAME}/clearpath/robot.yaml \
- && sed -i 's|namespace: /a200_0000|namespace: /|' /home/${USERNAME}/clearpath/robot.yaml
+RUN if [ "$ROS_DISTRO" = "jazzy" ]; then \
+        mkdir -p /home/${USERNAME}/clearpath \
+        && cp /opt/ros/${ROS_DISTRO}/share/clearpath_config/sample/a200_velodyne.yaml \
+            /home/${USERNAME}/clearpath/robot.yaml \
+        && sed -i 's|namespace: /a200_0000|namespace: /|' /home/${USERNAME}/clearpath/robot.yaml; \
+    fi
 
 WORKDIR /workspaces/fastviz
 CMD ["/bin/bash"]

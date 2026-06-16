@@ -12,8 +12,9 @@ use egui::{
     Visuals,
 };
 
-const SANS_REGULAR: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
-const SANS_MEDIUM: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Medium.ttf");
+const SANS_REGULAR: &[u8] = include_bytes!("../assets/fonts/PTS55F.ttf");
+const SANS_BOLD: &[u8] = include_bytes!("../assets/fonts/PTS75F.ttf");
+const FALLBACK_SANS: &[u8] = include_bytes!("../assets/fonts/DejaVuSans.ttf");
 const MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf");
 
 /// Shared accent across both variants. Picked to harmonise with the warm
@@ -56,35 +57,44 @@ pub fn install_fonts(ctx: &egui::Context) {
 
     fonts
         .font_data
-        .insert("plex_sans".to_owned(), FontData::from_static(SANS_REGULAR));
+        .insert("pt_sans".to_owned(), FontData::from_static(SANS_REGULAR));
     fonts.font_data.insert(
-        "plex_sans_medium".to_owned(),
-        FontData::from_static(SANS_MEDIUM),
+        "pt_sans_bold".to_owned(),
+        FontData::from_static(SANS_BOLD),
     );
+    fonts
+        .font_data
+        .insert("dejavu_sans".to_owned(), FontData::from_static(FALLBACK_SANS));
     fonts
         .font_data
         .insert("plex_mono".to_owned(), FontData::from_static(MONO_REGULAR));
 
-    // Primary Proportional / Monospace families: prepend Plex, keep egui's
+    // Primary Proportional / Monospace families: prepend PT Sans, keep egui's
     // built-in fallbacks (NotoEmoji etc.) for missing glyphs.
     fonts
         .families
         .entry(FontFamily::Proportional)
         .or_default()
-        .insert(0, "plex_sans".to_owned());
+        .insert(0, "pt_sans".to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(1, "dejavu_sans".to_owned());
     fonts
         .families
         .entry(FontFamily::Monospace)
         .or_default()
         .insert(0, "plex_mono".to_owned());
 
-    // Dedicated family for headings/branding so we can use Plex Sans Medium
+    // Dedicated family for headings/branding so we can use PT Sans Bold
     // without affecting body text. Falls back to regular Sans, then default.
     fonts.families.insert(
-        FontFamily::Name("plex_sans_medium".into()),
+        FontFamily::Name("pt_sans_bold".into()),
         vec![
-            "plex_sans_medium".to_owned(),
-            "plex_sans".to_owned(),
+            "pt_sans_bold".to_owned(),
+            "pt_sans".to_owned(),
+            "dejavu_sans".to_owned(),
             "Ubuntu-Light".to_owned(),
         ],
     );
@@ -251,11 +261,11 @@ fn tune_spacing(style: &mut Style) {
 
 fn tune_text_styles(style: &mut Style) {
     use FontFamily::{Monospace, Proportional};
-    let medium = FontFamily::Name("plex_sans_medium".into());
+    let bold = FontFamily::Name("pt_sans_bold".into());
     style.text_styles.insert(TextStyle::Small, FontId::new(11.0, Proportional.clone()));
     style.text_styles.insert(TextStyle::Body, FontId::new(13.0, Proportional.clone()));
     style.text_styles.insert(TextStyle::Button, FontId::new(13.0, Proportional.clone()));
-    style.text_styles.insert(TextStyle::Heading, FontId::new(17.0, medium));
+    style.text_styles.insert(TextStyle::Heading, FontId::new(17.0, bold));
     style.text_styles.insert(TextStyle::Monospace, FontId::new(12.5, Monospace));
 }
 

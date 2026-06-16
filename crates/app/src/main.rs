@@ -140,9 +140,27 @@ impl ApplicationHandler for App {
             return;
         }
 
+        let icon_bytes = include_bytes!("../../../icons/fastviz_round_f_64x64.png");
+        let icon_image = image::load_from_memory(icon_bytes).expect("Failed to load icon").into_rgba8();
+        let (width, height) = icon_image.dimensions();
+        let icon = winit::window::Icon::from_rgba(icon_image.into_raw(), width, height).unwrap();
+
         let window_attrs = Window::default_attributes()
             .with_title("fastviz")
+            // `with_window_icon` covers X11/XWayland and Windows. On Wayland it
+            // is a no-op: the compositor draws no client-supplied icon and
+            // instead resolves the icon from a `.desktop` file whose basename
+            // matches the surface app_id. We set app_id = "fastviz" below so it
+            // matches fastviz.desktop (installed system-wide by the .deb, or
+            // into ~/.local/share by icons/install-desktop.sh during dev).
+            .with_window_icon(Some(icon))
             .with_inner_size(LogicalSize::new(self.args.width, self.args.height));
+
+        #[cfg(target_os = "linux")]
+        let window_attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            window_attrs.with_name("fastviz", "")
+        };
 
         let window = match event_loop.create_window(window_attrs) {
             Ok(w) => Arc::new(w),
