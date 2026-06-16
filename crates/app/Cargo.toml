@@ -63,8 +63,8 @@ assets = [
 
 [package.metadata.deb.variants.humble]
 name = "fastviz-humble"
-depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-humble-tf2-msgs, ros-humble-nav-msgs, ros-humble-sensor-msgs, ros-humble-geometry-msgs, ros-humble-visualization-msgs"
+depends = "$auto, libvulkan1, ros-humble-tf2-msgs, ros-humble-nav-msgs, ros-humble-sensor-msgs, ros-humble-geometry-msgs, ros-humble-visualization-msgs"
 
 [package.metadata.deb.variants.jazzy]
 name = "fastviz-jazzy"
-depends = "libc6, libvulkan1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxrandr2, libxi6, libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0, ros-jazzy-tf2-msgs, ros-jazzy-nav-msgs, ros-jazzy-sensor-msgs, ros-jazzy-geometry-msgs, ros-jazzy-visualization-msgs"
+depends = "$auto, libvulkan1, ros-jazzy-tf2-msgs, ros-jazzy-nav-msgs, ros-jazzy-sensor-msgs, ros-jazzy-geometry-msgs, ros-jazzy-visualization-msgs"

@@ -144,7 +144,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app"
-version = "1.0.3"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "mock_injector"
-version = "1.0.3"
+version = "2.0.0"
 dependencies = [
  "glam",
  "scene",
@@ -2530,7 +2530,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "renderer"
-version = "1.0.3"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2544,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "ros_node"
-version = "1.0.3"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -2630,7 +2630,7 @@ dependencies = [
 
 [[package]]
 name = "scene"
-version = "1.0.3"
+version = "2.0.0"
 dependencies = [
  "bytemuck",
  "glam",
