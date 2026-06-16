@@ -20,7 +20,7 @@ x-fastviz-common: &fastviz-common
   # and shadow the working setup. Mesa llvmpipe (mesa-vulkan-drivers) is the
   # non-NVIDIA fallback.
   volumes:
-    - .:/workspaces/fastviz:cached
+    - .:/workspaces/fastviz
     - ${HOME}/.claude:/home/dev/.claude
     - /tmp/.X11-unix:/tmp/.X11-unix
     # Wayland socket (and dbus/pulse) live under XDG_RUNTIME_DIR; needed for WSI
@@ -28,17 +28,19 @@ x-fastviz-common: &fastviz-common
     - ${XDG_RUNTIME_DIR:-/run/user/1000}:${XDG_RUNTIME_DIR:-/run/user/1000}
   devices:
     - /dev/dri
-    - /dev/nvidia0
-    - /dev/nvidiactl
-    - /dev/nvidia-modeset
-  # On a non-NVIDIA host, comment out the deploy block; Mesa llvmpipe is used.
-  deploy:
-    resources:
-      reservations:
-        devices:
-          - driver: nvidia
-            count: all
-            capabilities: [gpu,compute,utility,graphics,display]
+  # On a non-NVIDIA host, comment out the deploy block; Mesa (Intel ANV /
+  # llvmpipe) is used. Leaving it enabled but stripping the /dev/nvidia*
+  # devices half-activates the toolkit: it injects the NVIDIA ICD + libs but
+  # not /dev/nvidia-modeset, so the driver loads, exposes a physical device
+  # that can't present, and vkGetPhysicalDeviceSurfacePresentModesKHR fails
+  # with ERROR_UNKNOWN. Disable the whole block to go Mesa-only.
+  # deploy:
+  #   resources:
+  #     reservations:
+  #       devices:
+  #         - driver: nvidia
+  #           count: all
+  #           capabilities: [gpu,compute,utility,graphics,display]
   command: sleep infinity
 
 services:

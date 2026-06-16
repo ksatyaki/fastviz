@@ -12,7 +12,7 @@
 {
     "name": "fastviz dev (jazzy + vulkan)",
     "dockerComposeFile": "../docker-compose.yml",
-    "service": "jazzy",
+    "service": "humble",
     "workspaceFolder": "/workspaces/fastviz",
     "remoteUser": "dev",
 
