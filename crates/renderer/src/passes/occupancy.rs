@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
-use scene::{Color, Colormap, EntityId, Grid, GridData, SceneGraph, ScenePrimitive};
+use scene::{Color, EntityId, Grid, GridData, SceneGraph, ScenePrimitive};
 
 use crate::gpu::{GpuContext, DEPTH_FORMAT};
 
@@ -272,12 +272,18 @@ impl OccupancyPass {
         rpass.set_bind_group(0, camera_bg, &[]);
         rpass.set_vertex_buffer(0, self.quad_vb.slice(..));
         rpass.set_index_buffer(self.quad_ib.slice(..), wgpu::IndexFormat::Uint32);
-        for (id, gg) in &self.grids {
+        // Grids are coplanar (the XZ plane) and alpha-blended, so draw order
+        // decides the overlay. Sort by EntityId so the static map (id 1000)
+        // draws first and costmaps (id 2500+) blend on top of it.
+        let mut ids: Vec<&EntityId> = self.grids.keys().collect();
+        ids.sort();
+        for id in ids {
             if let Some(e) = scene.entities.get(id) {
                 if !e.visible {
                     continue;
                 }
             }
+            let gg = &self.grids[id];
             rpass.set_bind_group(1, &gg.bind_group, &[]);
             rpass.draw_indexed(0..6, 0, 0..1);
         }
@@ -373,5 +379,3 @@ fn bake_pixels(grid: &Grid) -> Vec<u8> {
     }
     out
 }
-
-fn _ensure_colormap_used(_: Colormap) {}

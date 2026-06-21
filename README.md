@@ -200,4 +200,4 @@ style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
 
 ## Status
 
-Milestone 0.5 is complete: TF, OccupancyGrid, PoseStamped, PoseArray, Path, LaserScan, PointCloud2, URDF + JointState with STL/OBJ/DAE meshes, `visualization_msgs/Marker(Array)`, and TOML config with polled wildcard discovery + per-topic QoS. See [MBABYSTEPS_1.md](MBABYSTEPS_1.md) for the running plan.
+Milestone 0.5 is complete: TF, OccupancyGrid, costmap overlays, PoseStamped, PoseArray, Path, LaserScan, PointCloud2, URDF + JointState with STL/OBJ/DAE meshes, `visualization_msgs/Marker(Array)`, and TOML config with polled wildcard discovery + per-topic QoS. See [ros2_visualizer_project_plan.md](ros2_visualizer_project_plan.md) for the full plan and per-step build guide.

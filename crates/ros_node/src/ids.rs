@@ -14,6 +14,7 @@ pub const ROS_ID_POSE_ARRAY_BASE: u64 = 2100; // PoseArray topics
 pub const ROS_ID_PATH_BASE: u64 = 2200; // Path topics
 pub const ROS_ID_SCAN_BASE: u64 = 2300; // LaserScan topics
 pub const ROS_ID_POINTCLOUD_BASE: u64 = 2400; // PointCloud2 topics
+pub const ROS_ID_COSTMAP_BASE: u64 = 2500; // OccupancyGrid costmap-overlay topics
 
 /// URDF link entities live at 3000.. (plan §3.1).
 pub const URDF_LINK_BASE: u64 = 3000;
@@ -55,4 +56,8 @@ pub fn scan_id(topic_index: usize) -> EntityId {
 
 pub fn pointcloud_id(topic_index: usize) -> EntityId {
     EntityId(ROS_ID_POINTCLOUD_BASE + topic_index as u64)
+}
+
+pub fn costmap_id(topic_index: usize) -> EntityId {
+    EntityId(ROS_ID_COSTMAP_BASE + topic_index as u64)
 }

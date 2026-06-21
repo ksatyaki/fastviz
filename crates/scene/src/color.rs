@@ -85,6 +85,15 @@ mod tests {
     }
 
     #[test]
+    fn costmap_free_and_unknown_are_transparent() {
+        assert_eq!(Colormap::Costmap.sample(0).a, 0.0);
+        assert_eq!(Colormap::Costmap.sample(255).a, 0.0);
+        // Cost cells are visible.
+        assert!(Colormap::Costmap.sample(50).a > 0.0);
+        assert!(Colormap::Costmap.sample(100).a > 0.0);
+    }
+
+    #[test]
     fn hex_rejects_garbage() {
         assert!(Color::from_hex("not-a-color").is_none());
         assert!(Color::from_hex("#FFAA").is_none());
@@ -97,6 +106,11 @@ mod tests {
 pub enum Colormap {
     /// White=free (0), black=occupied (100), grey=unknown (255 / 0xFF for -1).
     OccupancyDefault,
+    /// Nav2/RViz cost gradient for `nav_msgs/OccupancyGrid` costmaps. Free
+    /// space (0) and unknown (255) are transparent so the map underneath shows
+    /// through; cost 1..98 ramps blue→red; 99 (inscribed) is cyan; 100
+    /// (lethal) is magenta.
+    Costmap,
     Grayscale,
     Inferno,
     /// 256-entry LUT.
@@ -116,6 +130,17 @@ impl Colormap {
                     let t = (v as f32) / 100.0;
                     let g = 1.0 - t;
                     Color::rgb(g, g, g)
+                }
+            },
+            Colormap::Costmap => match v {
+                // Free space and unknown are transparent so any map below shows through.
+                0 | 255 => Color::rgba(0.0, 0.0, 0.0, 0.0),
+                99 => Color::rgba(0.0, 1.0, 1.0, 0.85), // inscribed → cyan
+                100 => Color::rgba(1.0, 0.0, 1.0, 0.85), // lethal → magenta
+                // 1..=98: blue (low cost) → red (high cost).
+                _ => {
+                    let t = (v as f32) / 100.0;
+                    Color::rgba(t, 0.0, 1.0 - t, 0.85)
                 }
             },
             Colormap::Grayscale => {

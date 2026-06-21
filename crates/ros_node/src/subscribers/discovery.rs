@@ -17,8 +17,6 @@ use scene::SceneHandle;
 use crate::config::RosConfig;
 use crate::stats::RosStats;
 use crate::subscribers::{laserscan, marker, occupancy, path, pointcloud, pose};
-// occupancy::MSG_TYPE exists for symmetry but isn't used because the map
-// subscriber is single-topic (no wildcards in M0.5).
 use crate::tf::TfTree;
 use crate::tf_refresh::TfRegistry;
 
@@ -29,6 +27,7 @@ const WILDCARD: &str = "*";
 #[derive(Default, Debug)]
 pub struct Registry {
     map_spawned: bool,
+    costmaps: HashMap<String, usize>,
     poses: HashMap<String, usize>,
     pose_arrays: HashMap<String, usize>,
     paths: HashMap<String, usize>,
@@ -36,6 +35,7 @@ pub struct Registry {
     points: HashMap<String, usize>,
     markers: HashMap<String, usize>,
     marker_arrays: HashMap<String, usize>,
+    costmap_next: usize,
     pose_next: usize,
     pose_array_next: usize,
     path_next: usize,
@@ -70,6 +70,10 @@ pub fn bootstrap(
     } else {
         occupancy::spawn(node, spawner, scene.clone(), tf.clone(), cfg)?;
         reg.map_spawned = true;
+    }
+
+    for topic in cfg.costmap_topics.iter().filter(|t| t.as_str() != WILDCARD) {
+        spawn_costmap(node, spawner, &scene, &tf, cfg, &mut reg, topic)?;
     }
 
     for topic in cfg.pose_topics.iter().filter(|t| t.as_str() != WILDCARD) {
@@ -142,6 +146,7 @@ pub fn tick(
         }
     };
 
+    let costmap_wild = cfg.costmap_topics.iter().any(|t| t == WILDCARD);
     let pose_wild = cfg.pose_topics.iter().any(|t| t == WILDCARD);
     let pose_array_wild = cfg.pose_array_topics.iter().any(|t| t == WILDCARD);
     let path_wild = cfg.path_topics.iter().any(|t| t == WILDCARD);
@@ -152,7 +157,15 @@ pub fn tick(
 
     for (topic, types) in &snapshot {
         for ty in types {
-            if pose_wild && ty == pose::STAMPED_TYPE && !reg.poses.contains_key(topic) {
+            if costmap_wild
+                && ty == occupancy::MSG_TYPE
+                && topic != &cfg.map_topic
+                && !reg.costmaps.contains_key(topic)
+            {
+                // A wildcard costmap catches every OccupancyGrid except the one
+                // already shown as the static map.
+                spawn_costmap(node, spawner, scene, tf, cfg, reg, topic)?;
+            } else if pose_wild && ty == pose::STAMPED_TYPE && !reg.poses.contains_key(topic) {
                 spawn_pose(node, spawner, scene, tf, cfg, reg, topic)?;
             } else if pose_array_wild
                 && ty == pose::ARRAY_TYPE
@@ -186,6 +199,7 @@ pub fn tick(
 
 fn has_wildcard(cfg: &RosConfig) -> bool {
     [
+        &cfg.costmap_topics,
         &cfg.pose_topics,
         &cfg.pose_array_topics,
         &cfg.path_topics,
@@ -196,6 +210,34 @@ fn has_wildcard(cfg: &RosConfig) -> bool {
     ]
     .into_iter()
     .any(|v| v.iter().any(|t| t == WILDCARD))
+}
+
+fn spawn_costmap(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: &SceneHandle,
+    tf: &Arc<TfTree>,
+    cfg: &RosConfig,
+    reg: &mut Registry,
+    topic: &str,
+) -> Result<()> {
+    if reg.costmaps.contains_key(topic) {
+        return Ok(());
+    }
+    let idx = reg.costmap_next;
+    reg.costmap_next += 1;
+    occupancy::spawn_costmap_topic(
+        node,
+        spawner,
+        scene.clone(),
+        tf.clone(),
+        cfg.reference_frame.clone(),
+        topic.to_string(),
+        idx,
+        cfg.costmap_qos.get(topic).cloned(),
+    )?;
+    reg.costmaps.insert(topic.to_string(), idx);
+    Ok(())
 }
 
 fn spawn_pose(

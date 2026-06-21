@@ -1,11 +1,12 @@
 # ROS2 Visualizer — Project Plan
 *A ROS2-native, GPU-accelerated visualization tool built in Rust*
 
-*Plan version 2.0 — May 2026.* Folds the prior `ros2_visualizer_milestone0_detailed.md`
-into a single document. Milestone 0 is complete; Milestone 0.5 is in progress
-(only Step I — URDF + JointState — remaining). PointCloud2 was pulled forward
-from M3 into M0.5. For the running execution log and per-step notes, see
-[MBABYSTEPS_1.md](MBABYSTEPS_1.md).
+*Plan version 2.1 — June 2026.* Folds the prior
+`ros2_visualizer_milestone0_detailed.md` and the `MBABYSTEPS_1.md` execution log
+into this single document. Milestones 0 and 0.5 are complete. PointCloud2,
+Marker/MarkerArray, and Costmap2D were pulled forward from later milestones into
+M0.5. The numbered sub-steps in each milestone are in build order and double as
+a guide to how the repo was assembled.
 
 ---
 
@@ -93,8 +94,8 @@ DDS, and rendering is always smooth.
 | # | Focus | Status |
 |---|---|---|
 | 0 | Core renderer (no ROS2) | ✅ done |
-| 0.5 | 2D nav suite + PointCloud2 | 🟡 in progress — Step I (URDF) remaining |
-| 1 | Camera feeds & MarkerArray | ⏳ |
+| 0.5 | 2D nav suite + PointCloud2 + URDF + Markers + Costmaps | ✅ done |
+| 1 | Camera feeds & image display | ⏳ — MarkerArray and Costmap2D pulled forward into M0.5 |
 | 2 | Time-series & IMU | ⏳ |
 | 3 | PointCloud2 enhancements (color modes, benchmarking) | ⏳ — basic ingestion was pulled forward into M0.5 |
 | 4 | Plugin system & custom messages | ⏳ |
@@ -222,48 +223,49 @@ must not panic.
 - Mouse routing: egui captures when over a panel; 3D viewport otherwise.
 - Per-entity visibility goes through `SceneGraph::set_visible` so the
   revision counter bumps (direct field assignment would silently bypass the
-  pass cache — see Step H.2).
+  pass cache — see 0.5.11).
 
 ### 0.7 — Mock data injector ✅
 
 `mock_injector` populates the scene without ROS2: animated arrow, static
 occupancy grid, figure-8 polyline, two reference frames, a small mesh, 500
 hemisphere points. Layered on top of ROS subscribers when both are active
-(see Step G — `--mock` is opt-in but composable).
+(see 0.5.8 — `--mock` is opt-in but composable).
 
 ---
 
-## Milestone 0.5 — First ROS2 Node: 2D Navigation Suite (in progress)
+## Milestone 0.5 — First ROS2 Node: 2D Navigation Suite ✅
 
-**Goal:** subscribe to the six core 2D-nav data types plus PointCloud2,
-transform everything via TF, write into the scene graph from a dedicated
-ROS2 thread.
+**Goal:** subscribe to the core 2D-nav data types, transform everything via TF,
+and write into the scene graph from a dedicated ROS2 thread.
 
 **Crate added:** `ros_node` — depends on `r2r 0.9` only.
 
-**Exit criterion:** all seven data types visualized correctly in a real
-Nav2 stack (simulated or physical). TF transforms applied correctly. UI
-remains at 60fps under all listed topic rates.
+**Outcome:** OccupancyGrid maps, costmaps, poses, pose arrays, paths, laser
+scans, point clouds, URDF robot models, and markers all visualize correctly in
+a live Nav2 stack (simulated or physical), TF-applied, with the UI holding
+60fps under the listed topic rates.
 
-### Status (2026-05-09)
+The sub-steps below are in build order and double as a guide to how the repo
+was assembled.
 
-| Step | What | Status |
-|---|---|---|
-| A (0.5.1) | Crate skeleton + `RosNode::spawn` thread + clean shutdown | ✅ |
-| B (0.5.3) | OccupancyGrid (`/map`) → `Grid` (no TF) | ✅ |
-| C (0.5.2) | TF tree + reframe to `map` | ✅ |
-| D (0.5.4) | PoseStamped + PoseArray → Arrow(s) | ✅ |
-| E (0.5.5) | Path → Polyline | ✅ |
-| F (0.5.6) | LaserScan → Points | ✅ |
-| F.5 (added) | TOML config + polled topic discovery + per-topic QoS | ✅ |
-| G (added) | CLI flip: ROS always on, `--mock` opt-in | ✅ |
-| H (pulled from M3) | PointCloud2 → Points | ✅ |
-| H.1 (added) | PC2 received-vs-displayed counter | ✅ |
-| H.2 (added) | PointPass perf: revision cache, GPU-side transform, buffer reuse | ✅ |
-| I (0.5.7) | URDF + JointState → meshes + FK | ⏳ next |
-
-For per-step notes (smoke tests, measured numbers, decisions) see
-[MBABYSTEPS_1.md](MBABYSTEPS_1.md). The headline summary follows.
+| # | What |
+|---|---|
+| 0.5.1 | Node infrastructure: crate skeleton + `RosNode::spawn` thread + clean shutdown |
+| 0.5.2 | TF tree + reframe to `map` |
+| 0.5.3 | OccupancyGrid (`/map`) → `Grid` |
+| 0.5.4 | PoseStamped + PoseArray → Arrow(s) |
+| 0.5.5 | Path → Polyline |
+| 0.5.6 | LaserScan → Points |
+| 0.5.7 | TOML config + polled topic discovery + per-topic QoS |
+| 0.5.8 | CLI flip: ROS always on, `--mock` opt-in |
+| 0.5.9 | PointCloud2 → Points (pulled from M3) |
+| 0.5.10 | PC2 received-vs-displayed throughput counter |
+| 0.5.11 | PointPass performance: revision cache, GPU-side transform, buffer reuse |
+| 0.5.12 | URDF + JointState → meshes + forward kinematics |
+| 0.5.13 | Marker + MarkerArray → primitives (pulled from M1) |
+| 0.5.14 | Release CI: tag-triggered Linux build → GitHub Releases tarball |
+| 0.5.15 | Costmap overlay: OccupancyGrid cost colormap as a separate layer (pulled from M1) |
 
 ### Decisions log (do not relitigate)
 
@@ -279,7 +281,7 @@ For per-step notes (smoke tests, measured numbers, decisions) see
 | Coordinate convention | `ROS_TO_WORLD: Mat4` swaps ROS (x,y,z) → world (x,z,y). It's a reflection (det = −1) — accepted because M0.5 only consumes orientation as visual indicators. | Renderer is Y-up; ROS is Z-up. |
 | TF interpolation | Skipped — latest transform per frame only. | Add only if jitter is visible. None observed so far. |
 
-### 0.5.1 — Node infrastructure (Step A) ✅
+### 0.5.1 — Node infrastructure ✅
 
 ```rust
 // lib.rs
@@ -304,7 +306,7 @@ impl RosNode {
 - `RosNode` owns the executor thread; its `Drop` impl signals shutdown and joins. r2r consumes subscriptions as async streams, so we spin a `futures::executor::LocalPool` between `node.spin_once` calls.
 - **Acceptance:** `cargo run -p app -- --no-mock` → `/fastviz` visible in `ros2 node list` within ~1 s; `kill -INT` shuts down cleanly.
 
-### 0.5.2 — TF tree (Step C) ✅
+### 0.5.2 — TF tree ✅
 
 ```rust
 pub struct TransformEntry { pub parent: String, pub xform: glam::Mat4, pub stamp_ns: i64 }
@@ -321,26 +323,26 @@ impl TfTree {
 - `crates/ros_node/src/coords.rs` — `ROS_TO_WORLD` conversion. Subscribers compose `entity.transform = ROS_TO_WORLD * tf_in_ros * primitive_pose_in_ros * ROS_TO_WORLD` so renderer-local-XZ-plane primitives end up correctly placed.
 - Subscribers fall back to identity + a one-time warn if the TF lookup fails.
 
-### 0.5.3 — OccupancyGrid (Step B) ✅
+### 0.5.3 — OccupancyGrid → Grid ✅
 
 - Subscriber: `crates/ros_node/src/subscribers/occupancy.rs`.
 - Per message: `data: Vec<i8>` → `Vec<u8>` mapping `-1 → 255, 0 → 0, 100 → 100` (matches `Colormap::OccupancyDefault`).
 - Renderer-quirk: ROS sends `info.origin.position` as the **lower-left corner**; fastviz `Grid.origin` is the **center** — shift by half the map extent.
 - Stamp-based dedup: skip re-uploads when `header.stamp` is unchanged.
-- After Step C the grid is encoded in its own local frame (lower-left at origin, cells extending +X/+Y); all placement (`info.origin` pose + TF + coord swap) lives in `entity.transform`.
+- After 0.5.2 (TF) the grid is encoded in its own local frame (lower-left at origin, cells extending +X/+Y); all placement (`info.origin` pose + TF + coord swap) lives in `entity.transform`.
 - QoS uses `DurabilityPolicy::BestAvailable` so the subscriber connects to either a latched (`map_server`) or volatile (`ros2 topic pub`) publisher.
 
-### 0.5.4 — Poses (Step D) ✅
+### 0.5.4 — Poses → Arrows ✅
 
 - Subscriber: `crates/ros_node/src/subscribers/pose.rs`. Handles both `geometry_msgs/PoseStamped` (one Arrow per topic) and `geometry_msgs/PoseArray` (one entity holding many Arrows).
 - Each pose is composed `pose_in_world = ROS_TO_WORLD * tf_lookup(ref, frame_id) * pose_local`.
 - Arrow's `origin = pose_in_world.translation`, `direction = pose_in_world * X̂` (REP-103: arrow points along the body's +X / forward axis).
 
-### 0.5.5 — Path (Step E) ✅
+### 0.5.5 — Path → Polyline ✅
 
 - Subscriber: `crates/ros_node/src/subscribers/path.rs`. Single TF lookup per message (uses parent `header.frame_id`; per-pose headers ignored).
 
-### 0.5.6 — LaserScan (Step F) ✅
+### 0.5.6 — LaserScan → Points ✅
 
 - Subscriber: `crates/ros_node/src/subscribers/laserscan.rs`.
 - QoS: `QosProfile::sensor_data()` (best_effort, depth 5).
@@ -348,7 +350,7 @@ impl TfTree {
 - `Vec<Point>` buffer is reused across iterations.
 - Range filter: skip non-finite values, skip below `range_min`, skip above `range_max`.
 
-### 0.5.F.5 — Config + polled discovery + per-topic QoS ✅ *(added during M0.5)*
+### 0.5.7 — Config + polled discovery + per-topic QoS ✅
 
 **a. TOML config file.** `RosConfig::from_path(p)` loads via a `RawConfig`
 schema (TOML 1:1) that converts to runtime `RosConfig`. Missing fields fall
@@ -376,7 +378,7 @@ poses/pose_arrays/paths/scans/points; the map subscriber is single-topic
 or remove at runtime; subscriber teardown on topic-disappear; wildcards on the
 map subscriber.
 
-### 0.5.G — CLI flip ✅ *(added during M0.5)*
+### 0.5.8 — CLI flip ✅
 
 - `--ros` and `--no-ros` are gone. The ROS2 node always starts (this *is* a
   ROS2 visualizer). The `ros` cargo feature is still default-on so the gate
@@ -386,7 +388,7 @@ map subscriber.
   of ROS subscribers when present, so `--mock` means "test the rendering
   pipeline without a live ROS graph or in addition to one."
 
-### 0.5.H — PointCloud2 → Points ✅ *(pulled from M3)*
+### 0.5.9 — PointCloud2 → Points ✅ *(pulled from M3)*
 
 - Subscriber: `crates/ros_node/src/subscribers/pointcloud.rs`.
 - Parses `fields[]` once per message to locate `x`, `y`, `z` (FLOAT32 or FLOAT64; mixed types rejected). Walks `data` at `point_step` stride; non-finite values dropped. Big-endian buffers rejected with a one-line warn.
@@ -396,13 +398,13 @@ map subscriber.
 - Entity IDs from `pointcloud_id(idx)` (2400+).
 - **Intentional non-goals (deferred to M3):** intensity- or RGB-packed coloring; `is_dense=false` density-stats reporting; big-endian; struct-of-arrays format support; per-cloud aggregation history.
 
-### 0.5.H.1 — PC2 throughput counter ✅
+### 0.5.10 — PC2 throughput counter ✅
 
 - New module [stats.rs](crates/ros_node/src/stats.rs): `RosStats { pc2_received: AtomicU64 }`. Owned by `RosNode` as `Arc<RosStats>`, exposed via `RosNode::stats()`.
 - `App` keeps `pc2_last_seen_received: u64` and `pc2_displayed: u64`. Each `draw()` loads the atomic; if it advanced, exactly one of the new messages reached the screen — bump `pc2_displayed` by 1 regardless of how many were received in the interval (the rest were overwritten).
 - egui toolbar shows `PC2 D/R drop X%`. On `App::drop` and every 5 s during steady state, `log::info!("PC2 throughput: received=…, displayed=…, dropped=… (X%)")`.
 
-### 0.5.H.2 — PointPass performance ✅
+### 0.5.11 — PointPass performance ✅
 
 Five layered wins:
 
@@ -424,43 +426,95 @@ Drops only appear under occasional renderer stalls (Wayland surface
 reconfigure, etc.); steady-state drop rate is ~0.3% on integrated graphics.
 Discrete-GPU runs are expected to drop to 0%.
 
-### 0.5.7 / 0.5.I — URDF + JointState ⏳ *(next)*
+### 0.5.12 — URDF + JointState ✅
 
-**Input:** URDF file path (not a topic — loaded from disk, or eventually from
-the `robot_description` parameter).
-
-**Subscription:** `sensor_msgs/JointState` (for animation).
+`crates/ros_node/src/urdf.rs`. The model is loaded once at startup, then
+animated from `sensor_msgs/JointState`.
 
 **Loading pipeline:**
 ```
-URDF file
-  → parse with urdf-rs
-  → for each link: load mesh (STL via stl_io / OBJ via tobj; DAE deferred)
-  → resolve `package://` paths via AMENT_PREFIX_PATH
-  → build link tree
-  → register each link as a SceneEntity whose transform is updated by FK
+URDF source (file via --urdf / [urdf].path, or /robot_description String topic)
+  → parse with urdf-rs (xacro expansion supported)
+  → for each link's <visual>: load mesh (STL / OBJ / Collada .dae via mesh_loader)
+  → resolve package:// paths through urdf-rs (AMENT_PREFIX_PATH)
+  → build the link/joint tree
+  → register each link as a SceneEntity (id 3000..) whose transform is FK-driven
 ```
 
-**Animation:**
-- `JointState` callback updates joint angles in the URDF link tree.
-- Recompute forward kinematics → new transforms per link.
-- `scene.update_transform(entity_id, world_xform)` — no GPU re-upload (mesh data unchanged).
+Primitive `<box>` / `<cylinder>` / `<sphere>` geometries are tessellated
+directly (`box_mesh` / `cylinder_mesh` / `sphere_mesh`, shared with the marker
+subscriber). Per-link `<visual><origin>` rpy is baked into `visual_origin`.
 
-**Tasks:**
-- [ ] `urdf-rs` integration in `ros_node/src/urdf.rs`.
-- [ ] STL loader (binary STL → `Vec<Vertex>`).
-- [ ] OBJ loader (simple wavefront, no MTL required initially).
-- [ ] `package://` → filesystem path resolution via `AMENT_PREFIX_PATH`.
-- [ ] Forward kinematics from joint angles.
-- [ ] `JointState` subscriber → FK → scene entity transform updates.
-- [ ] CLI arg `--urdf /path/to/robot.urdf`. (Eventually load from `robot_description` param.)
-- [ ] egui panel: show/hide per link; toggle visual vs. collision meshes.
+**Animation:** the `JointState` callback writes joint positions into the link
+tree, `apply_joint_positions` recomputes forward kinematics, and
+`scene.update_transform(entity_id, world_xform)` repositions each link — no GPU
+re-upload, since the mesh data is unchanged.
 
-**Smoke test plan:**
-```bash
-cargo run -p app -- --urdf /opt/ros/jazzy/share/turtlebot3_description/urdf/turtlebot3_burger.urdf
-# wiggle joints with: ros2 run joint_state_publisher_gui joint_state_publisher_gui
-```
+**Inputs:** `--urdf /path/to/robot.urdf`, or `[urdf].topic = "/robot_description"`
+(TRANSIENT_LOCAL so the latched `robot_state_publisher` message is picked up).
+Joint topic via `[urdf].joint_states_topic` (default `/joint_states`).
+
+**Deferred:** visual-vs-collision mesh toggle; loading from the
+`robot_description` *parameter* (the String topic covers the common case).
+
+### 0.5.13 — Marker + MarkerArray → primitives ✅ *(pulled from M1)*
+
+`crates/ros_node/src/subscribers/marker.rs` subscribes to either
+`visualization_msgs/Marker` or `visualization_msgs/MarkerArray` per configured
+topic. Each topic owns a 100k-wide EntityId slab from
+`ids::ROS_ID_MARKER_BASE = 4_000_000`; every `(ns, id)` from the publisher gets
+a slot on first sight. `DELETE` removes one entity, `DELETEALL` clears the
+topic's slab. Markers register with `TfRegistry`, so late `/tf` retroactively
+repositions them (same mechanism scans and point clouds use).
+
+Config adds `[markers]` and `[marker_arrays]` sections (`topics` + per-topic
+QoS, `"*"` wildcard supported). `config_writer` gained `TopicKind::Marker` /
+`MarkerArray` so the Save-config window can emit those sections.
+
+| `Marker.type_` | Mapping |
+|---|---|
+| `ARROW` (0) | `Arrows` — position+scale or two-point `points[0..2]` form |
+| `CUBE` (1) | `Mesh` via `box_mesh`, `scale.xyz` as side lengths |
+| `SPHERE` (2) | `Mesh`, unit sphere scaled to `scale/2` per axis (ellipsoid) |
+| `CYLINDER` (3) | `Mesh` via `cylinder_mesh` (r = `max(sx,sy)/2`, h = `sz`) |
+| `LINE_STRIP` (4) | `Polyline`, width = `scale.x` |
+| `CUBE_LIST` (6), `SPHERE_LIST` (7), `POINTS` (8) | `Points`; per-point `colors[]` preserved |
+| `TEXT_VIEW_FACING` (9) | `Labels` at the marker pose, height = `scale.z` |
+| `TRIANGLE_LIST` (11) | `Mesh` from `points[]` triples with flat normals |
+| `LINE_LIST` (5), `MESH_RESOURCE` (10), `ARROW_STRIP` (12) | logged once, skipped (M1+) |
+
+**Deferred:** per-vertex `LINE_STRIP` colors; `MESH_RESOURCE` loading; lifetime
+expiry (markers stay until DELETE/DELETEALL or republish); every marker is
+treated as frame-locked (re-resolved through TF each refresh).
+
+### 0.5.14 — Release CI ✅
+
+Tag-triggered GitHub Actions workflow: builds Linux x86_64 inside a
+`ros:jazzy-ros-base` container and uploads the tarball to GitHub Releases.
+(`v2.0.0` auto-detects shared-lib deps for the `.deb`.)
+
+### 0.5.15 — Costmap overlay ✅ *(pulled from M1)*
+
+Costmaps are `nav_msgs/OccupancyGrid` topics rendered as a **separate layer**
+on top of the static `/map`, with a cost colormap instead of the occupancy one.
+
+- **`Colormap::Costmap`** (`crates/scene/src/color.rs`): free space (0) and
+  unknown (255 / −1) are fully transparent so the map below shows through;
+  cost 1..98 ramps blue→red; 99 (inscribed) is cyan; 100 (lethal) is magenta.
+- **`[costmaps]` config section** — per-topic OccupancyGrid overlays. Each gets
+  its own entity from `ids::ROS_ID_COSTMAP_BASE = 2500`, so the map (id 1000)
+  and any number of costmaps coexist. `"*"` subscribes to every OccupancyGrid
+  except the configured `map_topic`.
+- The occupancy subscriber was generalized: `spawn` (the map: opaque,
+  `OccupancyDefault`, id 1000) and `spawn_costmap_topic` (cost colormap,
+  id 2500+) share one `spawn_grid` core.
+- **Draw order:** map and costmaps are coplanar and alpha-blended, so
+  `OccupancyPass::draw` sorts grids by `EntityId` — the map (1000) draws first,
+  costmaps (2500+) blend on top.
+
+Smoke test from the devcontainer: publish a `nav_msgs/OccupancyGrid` on a
+costmap topic and list it under a `[costmaps]` section
+(`topics = ["/global_costmap/costmap"]`) in the fastviz config.
 
 ---
 
@@ -468,12 +522,16 @@ cargo run -p app -- --urdf /opt/ros/jazzy/share/turtlebot3_description/urdf/turt
 
 ### EntityId allocation
 
+Centralised in `crates/ros_node/src/ids.rs`.
+
 | Range | Owner |
 |---|---|
 | `1..=999` | mock injector (M0) |
-| `1000..=1999` | ROS singletons (TF frames hash into this; occupancy = 1000) |
-| `2000..=2999` | per-topic poses/paths/scans/pointclouds (allocated sequentially as topics arrive) |
-| `3000..=3999` | URDF link entities (M0.5 Step I) |
+| `1000` | OccupancyGrid map singleton |
+| `2000..` / `2100..` / `2200..` / `2300..` / `2400..` / `2500..` | per-topic poses / pose arrays / paths / scans / pointclouds / costmaps (sequential as topics arrive) |
+| `3000..` | URDF link entities |
+| `2_000_000..` | TF-frame axis entities |
+| `4_000_000..` | `Marker` entities — 100k-wide slab per topic; each `(ns, id)` gets a slot |
 
 ### Reference frame
 
@@ -491,7 +549,7 @@ list panel is meaningful. Visibility toggles route through
 
 ## Things explicitly out of scope for M0.5
 
-- `MarkerArray`, `Image`, `Imu`, `Odometry` → milestones 1–2.
+- `Image`, `Imu`, `Odometry` → milestones 1–2.
 - MCAP record/playback → M5.
 - Plugin system → M4.
 - `rclrs` work.
@@ -502,15 +560,16 @@ list panel is meaningful. Visibility toggles route through
 
 ## Future Milestones
 
-### Milestone 1 — Camera Feeds & MarkerArray
+### Milestone 1 — Camera Feeds & Image Display
 
 - [ ] `sensor_msgs/Image` and `sensor_msgs/CompressedImage` — 2D panel, GPU texture upload.
 - [ ] Camera info overlay (topic, hz, resolution).
-- [ ] `visualization_msgs/MarkerArray` — arrow, cube, sphere, line strip, text label, mesh resource.
-- [ ] Costmap2D overlay (second `OccupancyGrid` layer with separate colormap).
+- [x] `visualization_msgs/Marker` + `MarkerArray` — done in M0.5 (0.5.13).
+- [x] Costmap2D overlay (separate `OccupancyGrid` layer with cost colormap) — done in M0.5 (0.5.15).
+- [ ] `MESH_RESOURCE` marker geometry (deferred from 0.5.13).
 - [ ] Topic discovery UI: browse and subscribe to any topic from within the app.
 
-**Deliverable:** full sensor suite visible; Nav2 costmaps renderable; arbitrary debug markers supported.
+**Deliverable:** full sensor suite visible; remaining gap is camera/image display.
 
 ### Milestone 2 — Time Series & IMU
 
@@ -525,10 +584,10 @@ list panel is meaningful. Visibility toggles route through
 ### Milestone 3 — PointCloud2 enhancements
 
 *Basic PC2 ingestion + GPU pipeline + revision-cached point pass were
-completed in M0.5 (Step H / H.1 / H.2). This milestone is the deferred work.*
+completed in M0.5 (0.5.9 / 0.5.10 / 0.5.11). This milestone is the deferred work.*
 
 - [ ] Color modes: flat, intensity, height, ring, time.
-- [ ] Intensity- and RGB-packed coloring (deferred from H).
+- [ ] Intensity- and RGB-packed coloring (deferred from 0.5.9).
 - [ ] `is_dense=false` density-stats reporting.
 - [ ] Big-endian buffer support.
 - [ ] Struct-of-arrays format support.
@@ -593,7 +652,6 @@ fastviz/
 ├── .devcontainer/              # Ubuntu 24.04 + ROS2 Jazzy
 ├── Dockerfile                  # release image (M0 path)
 ├── configs/                    # *.toml configs (default mirrors RosConfig::default())
-├── MBABYSTEPS_1.md             # running execution log
 ├── ros2_visualizer_project_plan.md   # this file
 └── README.md
 ```
@@ -626,7 +684,7 @@ Future crates (per-milestone): `plugin_api/`, `builtin_plugins/`, `mcap_io/`.
 
 ## Success Metrics
 
-- Point cloud rendering at **60fps** for 100k+ points on a mid-range GPU. *(M0.5 H.2 hits 0.3% drop on Intel iGPU at 161k pts/cloud × 14 Hz; M3 should formalise the bench vs RViz2.)*
+- Point cloud rendering at **60fps** for 100k+ points on a mid-range GPU. *(M0.5 step 0.5.11 hits 0.3% drop on Intel iGPU at 161k pts/cloud × 14 Hz; M3 should formalise the bench vs RViz2.)*
 - **Cold start to first frame** under 2 seconds.
 - Works in Docker with **zero extra configuration** beyond X11 socket mount.
 - Plugin tutorial completable in **under 1 hour**.
@@ -634,7 +692,8 @@ Future crates (per-milestone): `plugin_api/`, `builtin_plugins/`, `mcap_io/`.
 
 ---
 
-*Plan v2.0 — May 2026.*
-*Combines the previous `ros2_visualizer_project_plan.md` (vision, architecture,
-milestone overview) with `ros2_visualizer_milestone0_detailed.md` (M0 / M0.5
-sub-task detail). MBABYSTEPS_1.md remains the running execution log.*
+*Plan v2.1 — June 2026.*
+*Single source of truth: combines the original project plan (vision,
+architecture, milestone overview), `ros2_visualizer_milestone0_detailed.md`
+(M0 / M0.5 sub-task detail), and the former `MBABYSTEPS_1.md` execution log
+(now folded in and removed).*

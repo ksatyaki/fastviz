@@ -63,6 +63,16 @@ topics = ["/map"]
 # reliability = "reliable"
 
 # ---------------------------------------------------------------------------
+# nav_msgs/OccupancyGrid costmaps — cost colormap, free/unknown transparent so
+# they layer on top of [map]. One entity per topic; ["*"] subscribes to every
+# OccupancyGrid except the [map] topic. Empty by default.
+# ---------------------------------------------------------------------------
+# [costmaps]
+# topics = ["/global_costmap/costmap", "/local_costmap/costmap"]
+# [costmaps.qos."/local_costmap/costmap"]
+# reliability = "best_effort"
+
+# ---------------------------------------------------------------------------
 # geometry_msgs/PoseStamped — one Arrow per topic.
 # Use ["*"] to subscribe to every PoseStamped publisher visible on the graph.
 # ---------------------------------------------------------------------------

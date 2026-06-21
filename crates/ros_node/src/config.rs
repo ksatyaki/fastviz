@@ -27,6 +27,10 @@ pub struct RosConfig {
     /// Initial TF axis-arm length (meters). UI can mutate at runtime.
     pub tf_axis_length: Option<f32>,
     pub map_topic: String,
+    /// Topics carrying `nav_msgs/OccupancyGrid` to render as cost overlays
+    /// (cost colormap, free/unknown transparent). Each gets its own entity, so
+    /// these layer on top of `map_topic`. Supports the `"*"` wildcard.
+    pub costmap_topics: Vec<String>,
     /// Topics carrying `geometry_msgs/PoseStamped`. Each gets one Arrow entity.
     pub pose_topics: Vec<String>,
     /// Topics carrying `geometry_msgs/PoseArray`. Each gets one entity holding many Arrows.
@@ -64,6 +68,7 @@ pub struct RosConfig {
     pub tf_static_qos: Option<QosOverride>,
     /// Per-topic QoS overrides (applied on top of each subscriber's default profile).
     pub map_qos: HashMap<String, QosOverride>,
+    pub costmap_qos: HashMap<String, QosOverride>,
     pub pose_qos: HashMap<String, QosOverride>,
     pub pose_array_qos: HashMap<String, QosOverride>,
     pub path_qos: HashMap<String, QosOverride>,
@@ -219,6 +224,7 @@ impl Default for RosConfig {
             reference_frame: "map".into(),
             tf_axis_length: None,
             map_topic: "/map".into(),
+            costmap_topics: Vec::new(),
             pose_topics: vec!["/goal_pose".into()],
             pose_array_topics: vec!["/particle_cloud".into()],
             arrow: ArrowStyle::default(),
@@ -239,6 +245,7 @@ impl Default for RosConfig {
             tf_qos: None,
             tf_static_qos: None,
             map_qos: HashMap::new(),
+            costmap_qos: HashMap::new(),
             pose_qos: HashMap::new(),
             pose_array_qos: HashMap::new(),
             path_qos: HashMap::new(),
@@ -275,6 +282,7 @@ pub struct RawConfig {
     pub namespace: Option<String>,
     pub reference_frame: Option<String>,
     pub map: Option<RawMap>,
+    pub costmaps: Option<RawTopics>,
     pub poses: Option<RawTopics>,
     pub pose_arrays: Option<RawTopics>,
     pub arrow: Option<RawArrow>,
@@ -422,6 +430,7 @@ impl RawConfig {
             namespace,
             reference_frame,
             map,
+            costmaps,
             poses,
             pose_arrays,
             arrow,
@@ -438,6 +447,10 @@ impl RawConfig {
         let (map_topic, map_qos) = match map {
             Some(m) => (m.topics.into_iter().next().unwrap_or(d.map_topic), m.qos),
             None => (d.map_topic, d.map_qos),
+        };
+        let (costmap_topics, costmap_qos) = match costmaps {
+            Some(c) => (c.topics, c.qos),
+            None => (d.costmap_topics, d.costmap_qos),
         };
         let (pose_topics, pose_qos) = match poses {
             Some(p) => (p.topics, p.qos),
@@ -561,6 +574,7 @@ impl RawConfig {
             reference_frame: reference_frame.unwrap_or(d.reference_frame),
             tf_axis_length,
             map_topic,
+            costmap_topics,
             pose_topics,
             pose_array_topics,
             arrow: arrow_style,
@@ -581,6 +595,7 @@ impl RawConfig {
             tf_qos,
             tf_static_qos,
             map_qos,
+            costmap_qos,
             pose_qos,
             pose_array_qos,
             path_qos,
@@ -663,6 +678,33 @@ mod tests {
         assert!((cfg.arrow.length - 0.7).abs() < 1e-6);
         assert!((cfg.path_style.width - 3.0).abs() < 1e-6);
         assert!((cfg.scan_style.size - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn costmaps_section_parses_topics_and_qos() {
+        let toml = r#"
+            [costmaps]
+            topics = ["/global_costmap/costmap", "/local_costmap/costmap"]
+
+            [costmaps.qos."/local_costmap/costmap"]
+            reliability = "best_effort"
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        assert_eq!(
+            cfg.costmap_topics,
+            vec!["/global_costmap/costmap", "/local_costmap/costmap"]
+        );
+        assert_eq!(
+            cfg.costmap_qos
+                .get("/local_costmap/costmap")
+                .unwrap()
+                .reliability
+                .as_deref(),
+            Some("best_effort")
+        );
+        // Map is independent of costmaps.
+        assert_eq!(cfg.map_topic, "/map");
     }
 
     #[test]

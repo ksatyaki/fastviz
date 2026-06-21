@@ -16,14 +16,14 @@ use r2r::qos::DurabilityPolicy;
 use r2r::{nav_msgs, QosProfile};
 use scene::{Colormap, Grid, GridData, SceneEntity, SceneHandle, ScenePrimitive};
 
-use crate::config::RosConfig;
+use crate::config::{QosOverride, RosConfig};
 use crate::coords::{QUAD_SWAP, ROS_TO_WORLD};
-use crate::ids::ROS_ID_MAP;
+use crate::ids::{costmap_id, ROS_ID_MAP};
 use crate::tf::TfTree;
 
-#[allow(dead_code)] // map doesn't support wildcards in M0.5; kept for symmetry / future use
 pub const MSG_TYPE: &str = "nav_msgs/msg/OccupancyGrid";
 
+/// `/map` subscriber: single topic, rendered opaque with the occupancy colormap.
 pub fn spawn(
     node: &mut r2r::Node,
     spawner: &LocalSpawner,
@@ -31,27 +31,78 @@ pub fn spawn(
     tf: Arc<TfTree>,
     cfg: &RosConfig,
 ) -> Result<()> {
-    // Map publishers commonly use TRANSIENT_LOCAL (latched) durability, but ad-hoc
-    // pubs may use VOLATILE. BestAvailable matches whatever the publisher offers.
+    spawn_grid(
+        node,
+        spawner,
+        scene,
+        tf,
+        cfg.reference_frame.clone(),
+        cfg.map_topic.clone(),
+        ROS_ID_MAP,
+        Colormap::OccupancyDefault,
+        "map",
+        cfg.map_qos.get(&cfg.map_topic).cloned(),
+    )
+}
+
+/// Costmap-overlay subscriber: per-topic entity, rendered with the cost
+/// colormap (free/unknown transparent) so it layers on top of `/map`.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_costmap_topic(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: SceneHandle,
+    tf: Arc<TfTree>,
+    reference_frame: String,
+    topic: String,
+    topic_index: usize,
+    qos_override: Option<QosOverride>,
+) -> Result<()> {
+    spawn_grid(
+        node,
+        spawner,
+        scene,
+        tf,
+        reference_frame,
+        topic,
+        costmap_id(topic_index),
+        Colormap::Costmap,
+        "costmap",
+        qos_override,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_grid(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: SceneHandle,
+    tf: Arc<TfTree>,
+    reference_frame: String,
+    topic: String,
+    entity_id: scene::EntityId,
+    colormap: Colormap,
+    label_kind: &'static str,
+    qos_override: Option<QosOverride>,
+) -> Result<()> {
+    // Grid publishers commonly use TRANSIENT_LOCAL (latched) durability, but ad-hoc
+    // pubs (and most costmaps) use VOLATILE. BestAvailable matches either.
     #[cfg(not(ros_humble))]
     let durability = DurabilityPolicy::BestAvailable;
     #[cfg(ros_humble)]
     let durability = DurabilityPolicy::TransientLocal;
 
-    let mut qos = QosProfile::default()
-        .keep_last(1)
-        .durability(durability);
-    let topic = cfg.map_topic.clone();
-    if let Some(o) = cfg.map_qos.get(&topic) {
+    let mut qos = QosProfile::default().keep_last(1).durability(durability);
+    if let Some(o) = &qos_override {
         qos = o.apply(qos);
         log::debug!("qos override applied to {topic}: {o:?}");
     }
     let mut sub = node
         .subscribe::<nav_msgs::msg::OccupancyGrid>(&topic, qos)
         .with_context(|| format!("subscribing to {topic}"))?;
-    log::info!("subscribed: {topic} (nav_msgs/OccupancyGrid)");
+    log::info!("subscribed: {topic} (nav_msgs/OccupancyGrid, {label_kind})");
 
-    let reference_frame = cfg.reference_frame.clone();
+    let label = format!("{topic} [{label_kind}]");
     spawner
         .spawn_local(async move {
             let mut last_stamp_ns: Option<i64> = None;
@@ -72,16 +123,11 @@ pub fn spawn(
                         msg.header.frame_id
                     );
                     first = false;
-                } else {
-                    log::debug!(
-                        "{topic}: update ({}x{}, frame={})",
-                        msg.info.width,
-                        msg.info.height,
-                        msg.header.frame_id
-                    );
                 }
 
-                if let Some(entity) = build_entity(&msg, &tf, &reference_frame) {
+                if let Some(entity) =
+                    build_entity(&msg, &tf, &reference_frame, entity_id, colormap.clone(), &label)
+                {
                     scene.write().upsert(entity);
                 }
             }
@@ -99,6 +145,9 @@ fn build_entity(
     msg: &nav_msgs::msg::OccupancyGrid,
     tf: &TfTree,
     reference_frame: &str,
+    entity_id: scene::EntityId,
+    colormap: Colormap,
+    label: &str,
 ) -> Option<SceneEntity> {
     let cols = msg.info.width;
     let rows = msg.info.height;
@@ -120,7 +169,7 @@ fn build_entity(
         cell_size,
         cols,
         rows,
-        data: GridData::Cells(cells, Colormap::OccupancyDefault),
+        data: GridData::Cells(cells, colormap),
     };
 
     // Pose of the grid's local frame inside header.frame_id (info.origin).
@@ -155,8 +204,8 @@ fn build_entity(
     let transform = ROS_TO_WORLD * tf_ref_from_frame * pose_in_frame * QUAD_SWAP;
 
     Some(
-        SceneEntity::new(ROS_ID_MAP, ScenePrimitive::Grid(grid))
+        SceneEntity::new(entity_id, ScenePrimitive::Grid(grid))
             .with_transform(transform)
-            .with_label(format!("/map [{}]", msg.header.frame_id)),
+            .with_label(label.to_string()),
     )
 }
