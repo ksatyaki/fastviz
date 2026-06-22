@@ -8,6 +8,17 @@ use scene::SceneGraph;
 
 use crate::subscribers::{laserscan, marker, occupancy, path, pointcloud, pose};
 
+/// Snapshot of the orbit camera, baked into `[view]` so a saved config reopens
+/// with the same framing (RViz saves the camera the same way). Mirrors the
+/// fields of `renderer::OrbitCamera` that the UI controls.
+#[derive(Clone, Copy, Debug)]
+pub struct CameraSave {
+    pub target: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+}
+
 /// Plain-data representation of a UI group passed in for saving. Decouples the
 /// writer from the egui-dependent runtime type in the app crate.
 #[derive(Clone, Debug)]
@@ -162,6 +173,7 @@ pub fn to_toml(
 /// - UI groups are emitted in the order they appear in `ui_groups`
 ///
 /// Topics not represented in `scene` fall back to the writer's default styles.
+#[allow(clippy::too_many_arguments)]
 pub fn to_toml_full(
     topics: &[(String, Vec<String>)],
     selected: &[String],
@@ -169,6 +181,7 @@ pub fn to_toml_full(
     scene: &SceneGraph,
     tf_axis_length: f32,
     ui_groups: &[UiGroupSave],
+    camera: Option<CameraSave>,
 ) -> String {
     use std::collections::BTreeSet;
     let want: BTreeSet<&str> = selected.iter().map(String::as_str).collect();
@@ -209,6 +222,19 @@ pub fn to_toml_full(
 
     out.push_str("[tf]\n");
     out.push_str(&format!("axis_length = {}\n\n", fmt_f(tf_axis_length)));
+
+    if let Some(c) = camera {
+        out.push_str("[view]\n");
+        out.push_str(&format!(
+            "target = [{}, {}, {}]\n",
+            fmt_f(c.target[0]),
+            fmt_f(c.target[1]),
+            fmt_f(c.target[2])
+        ));
+        out.push_str(&format!("yaw = {}\n", fmt_f(c.yaw)));
+        out.push_str(&format!("pitch = {}\n", fmt_f(c.pitch)));
+        out.push_str(&format!("distance = {}\n\n", fmt_f(c.distance)));
+    }
 
     if let Some(t) = &map {
         out.push_str("[map]\n");
@@ -401,6 +427,35 @@ mod tests {
         assert!(out.contains("[points]"));
         assert!(out.contains("\"/camera/points\""));
         assert!(!out.contains("/ignored"));
+    }
+
+    #[test]
+    fn full_config_with_view_round_trips_through_parser() {
+        let s = snap(&[("/scan", &[laserscan::MSG_TYPE])]);
+        let scene = SceneGraph::new("map");
+        let cam = CameraSave {
+            target: [1.0, 2.0, 3.0],
+            yaw: 0.5,
+            pitch: 0.7,
+            distance: 12.0,
+        };
+        let out = to_toml_full(
+            &s,
+            &["/scan".to_string()],
+            "map",
+            &scene,
+            0.3,
+            &[],
+            Some(cam),
+        );
+        assert!(out.contains("[view]"));
+        assert!(out.contains("target = [1.0, 2.0, 3.0]"));
+        // The generated file must be valid fastviz config.
+        let raw: crate::config::RawConfig = toml::from_str(&out).expect("parses");
+        let cfg = raw.into_runtime();
+        let v = cfg.view.expect("view present");
+        assert_eq!(v.target, [1.0, 2.0, 3.0]);
+        assert_eq!(cfg.scan_topics, vec!["/scan"]);
     }
 
     #[test]

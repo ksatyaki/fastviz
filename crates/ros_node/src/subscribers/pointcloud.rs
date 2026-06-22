@@ -162,11 +162,13 @@ pub fn spawn_topic(
                 }
 
                 let frame = &msg.header.frame_id;
+                let stamp_ns = (msg.header.stamp.sec as i64) * 1_000_000_000
+                    + (msg.header.stamp.nanosec as i64);
                 let tf_ref_from_frame = if frame == &reference_frame {
                     warned_missing_tf = false;
                     Mat4::IDENTITY
                 } else {
-                    match tf.lookup(&reference_frame, frame) {
+                    match tf.lookup_at(&reference_frame, frame, stamp_ns) {
                         Some(m) => {
                             warned_missing_tf = false;
                             m
@@ -204,7 +206,7 @@ pub fn spawn_topic(
                 // (Re-)bind to the registry so late /tf arrivals get applied
                 // by the main loop's refresh pass even if no fresh cloud
                 // message comes in. Points are already in `frame` coords.
-                tf_refresh.register(id, frame.as_str(), Mat4::IDENTITY);
+                tf_refresh.register_at(id, frame.as_str(), Mat4::IDENTITY, Some(stamp_ns));
                 stats.pc2_received.fetch_add(1, Ordering::Relaxed);
             }
         })

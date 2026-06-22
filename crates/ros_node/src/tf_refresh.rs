@@ -31,6 +31,10 @@ struct Entry {
     /// For URDF visuals expressed in the link's own frame, this is the
     /// link's `<visual><origin>` offset.
     local: Mat4,
+    /// Message stamp (ns) the entity was sampled at. When `Some`, refresh
+    /// interpolates the TF lookup at this stamp (RViz-style) instead of using
+    /// the latest transform; `None` (URDF FK, one-shot poses) uses latest.
+    stamp_ns: Option<i64>,
 }
 
 #[derive(Default)]
@@ -51,11 +55,26 @@ impl TfRegistry {
     /// will recompute the world transform from `frame` + `local` and the
     /// current TF tree.
     pub fn register(&self, id: EntityId, frame: impl Into<String>, local: Mat4) {
+        self.register_at(id, frame, local, None);
+    }
+
+    /// Like [`register`](Self::register), but binds the entity to a message
+    /// `stamp_ns` so [`refresh`](Self::refresh) interpolates the TF lookup at
+    /// that instant. Use for stamped sensor data (scans, clouds) where the
+    /// message and the latest TF can be milliseconds apart.
+    pub fn register_at(
+        &self,
+        id: EntityId,
+        frame: impl Into<String>,
+        local: Mat4,
+        stamp_ns: Option<i64>,
+    ) {
         self.entries.lock().insert(
             id,
             Entry {
                 frame: frame.into(),
                 local,
+                stamp_ns,
             },
         );
         // Fresh registration may resolve a previously-broken lookup; let the
@@ -85,7 +104,11 @@ impl TfRegistry {
             let tf_ref_from_frame = if entry.frame == reference_frame {
                 Mat4::IDENTITY
             } else {
-                match tf.lookup(reference_frame, &entry.frame) {
+                let lookup = match entry.stamp_ns {
+                    Some(stamp) => tf.lookup_at(reference_frame, &entry.frame, stamp),
+                    None => tf.lookup(reference_frame, &entry.frame),
+                };
+                match lookup {
                     Some(m) => m,
                     None => {
                         if warned.insert(*id) {
@@ -136,11 +159,14 @@ mod tests {
     }
 
     fn translation_entry(parent: &str, t: Vec3) -> TransformEntry {
-        TransformEntry {
-            parent: parent.into(),
-            xform: Mat4::from_translation(t),
-            stamp_ns: 0,
-        }
+        TransformEntry::from_sample(
+            parent.into(),
+            crate::tf::TfSample {
+                stamp_ns: 0,
+                rot: glam::Quat::IDENTITY,
+                trans: t,
+            },
+        )
     }
 
     #[test]

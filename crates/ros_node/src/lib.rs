@@ -17,9 +17,10 @@ pub mod tf_axes;
 pub mod tf_refresh;
 pub mod urdf;
 
-pub use config::{RosConfig, UiGroup};
+pub use config::{RosConfig, UiGroup, ViewConfig};
 pub use config_writer::{
-    to_toml as config_to_toml, to_toml_full as config_to_toml_full, TopicKind, UiGroupSave,
+    to_toml as config_to_toml, to_toml_full as config_to_toml_full, CameraSave, TopicKind,
+    UiGroupSave,
 };
 pub use ids::{ROS_ID_MARKER_BASE, TF_FRAME_BASE, TF_FRAME_CAPACITY, URDF_LINK_BASE};
 pub use node::{RosNode, TopicsSnapshot};

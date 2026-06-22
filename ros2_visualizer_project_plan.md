@@ -38,7 +38,7 @@ Working name: **`fastviz`**. To be revisited at community launch.
 | Windowing | winit 0.30 | ApplicationHandler model, X11 + Wayland |
 | ROS2 bindings | **r2r 0.9** (only) | Pure-cargo build flow, mature for sub/pub. `rclrs` is deferred until dynamic-message needs appear. |
 | Message types | r2r generates from `AMENT_PREFIX_PATH` at build time | No `ros_idl` codegen step in our tree |
-| TF | Reimplemented in Rust (`crates/ros_node/src/tf.rs`) | Latest-only lookup; interpolation deferred unless jitter is observed |
+| TF | Reimplemented in Rust (`crates/ros_node/src/tf.rs`) | Latest-only `lookup` + interpolated `lookup_at(stamp)` over a bounded per-frame history (slerp/lerp) |
 | Occupancy grid | wgpu texture | Grid as R8Unorm texture; colormap in fragment shader |
 | Point cloud | Custom wgpu pipeline | GPU-side per-entity transform; `revision()`-cached `prepare()` |
 | Mesh/URDF | `urdf-rs` + `stl_io` (binary STL) + `tobj` (OBJ) | DAE deferred |
@@ -266,6 +266,9 @@ was assembled.
 | 0.5.13 | Marker + MarkerArray → primitives (pulled from M1) |
 | 0.5.14 | Release CI: tag-triggered Linux build → GitHub Releases tarball |
 | 0.5.15 | Costmap overlay: OccupancyGrid cost colormap as a separate layer (pulled from M1) |
+| 0.5.16 | Live "Add" dialog: subscribe to graph topics at runtime, namespace-tree UI |
+| 0.5.17 | Save config: name + displayed topics + camera view → `<name>.toml` in the CWD |
+| 0.5.18 | TF interpolation: bounded per-frame history + slerp/lerp `lookup_at(stamp)` |
 
 ### Decisions log (do not relitigate)
 
@@ -279,7 +282,9 @@ was assembled.
 | ROS env at build time | `LIBCLANG_PATH=/usr/lib/x86_64-linux-gnu` exported in `~/.bashrc`. | r2r's `bindgen` step needs libclang; without this it fails on first build. |
 | Discovery model | **Polled** at ~1 Hz via `node.get_topic_names_and_types()`. | r2r 0.9 doesn't expose the rcl graph guard condition. Going around r2r to DDS (`rustdds`/`cyclonedds-rs`) gives reactive discovery but doubles the DDS participant + serde pipeline. Polling rcl costs ~nothing. |
 | Coordinate convention | `ROS_TO_WORLD: Mat4` swaps ROS (x,y,z) → world (x,z,y). It's a reflection (det = −1) — accepted because M0.5 only consumes orientation as visual indicators. | Renderer is Y-up; ROS is Z-up. |
-| TF interpolation | Skipped — latest transform per frame only. | Add only if jitter is visible. None observed so far. |
+| TF interpolation | **Implemented** (0.5.18) — bounded per-frame sample history + slerp/lerp `lookup_at(target, source, stamp)`. Stamp-free `lookup` still returns latest. | Stamped sensor data (scans, clouds) is now reframed at *its own* timestamp instead of snapping to the newest TF, matching RViz. History bounded to 100 samples/frame. |
+| Live topic add | UI sends `(topic, kind)` over an unbounded channel; the executor drains it each spin and spawns the matching subscriber. The subscriber `Registry` guards double-subscribe. | r2r subscriptions need `&mut Node`, which only the executor thread holds. A channel keeps the render thread non-blocking and reuses the existing per-kind spawn paths. |
+| View persistence | Camera (`target`, `yaw`, `pitch`, `distance`) saved to `[view]` and restored at startup. | RViz saves the camera in its config; matching that lets a saved fastviz config reopen with the same framing. |
 
 ### 0.5.1 — Node infrastructure ✅
 
@@ -374,9 +379,9 @@ module exposes `MSG_TYPE: &str` + `pub fn spawn_topic`. Wildcards work for
 poses/pose_arrays/paths/scans/points; the map subscriber is single-topic
 (wildcard `"*"` rejected with one warn at bootstrap).
 
-**Out of scope** (deferred): regex/glob beyond bare `"*"`; egui sidebar to add
-or remove at runtime; subscriber teardown on topic-disappear; wildcards on the
-map subscriber.
+**Out of scope** (deferred): regex/glob beyond bare `"*"`; subscriber teardown
+on topic-disappear; wildcards on the map subscriber. (Adding topics at runtime
+from the UI landed later — see 0.5.16.)
 
 ### 0.5.8 — CLI flip ✅
 
@@ -516,6 +521,56 @@ Smoke test from the devcontainer: publish a `nav_msgs/OccupancyGrid` on a
 costmap topic and list it under a `[costmaps]` section
 (`topics = ["/global_costmap/costmap"]`) in the fastviz config.
 
+### 0.5.16 — Live "Add" dialog ✅
+
+Toolbar **Add** opens a window listing every topic on the live ROS graph and
+subscribes to the chosen ones *without a restart* (RViz's "Add" affordance).
+
+- **Runtime subscribe path.** r2r subscriptions require `&mut Node`, held only
+  by the executor thread. The UI sends `(topic, TopicKind)` over an unbounded
+  `crossbeam` channel (`RosNode::request_add_topic`); the executor drains it
+  each spin and calls `subscribers::discovery::spawn_for_kind`, reusing the
+  existing per-kind spawn functions. The `Registry` makes a double-add a no-op.
+  An OccupancyGrid fills the singleton map slot if free, else lands as a costmap
+  overlay.
+- **Namespace tree.** Supported topics render first as a collapsible tree split
+  on `/` (`NsNode` in `ui.rs`), **collapsed by default**. Each namespace has a
+  `+ all` button (subscribe to the whole subtree, e.g. everything under
+  `/robot1/`); each leaf has an `Add` button; already-shown topics read
+  "added". Unsupported topics are tucked into a collapsed section at the bottom.
+- Added topics are appended to the app's `active_topics` so they're included in
+  a subsequent **Save config**.
+
+### 0.5.17 — Save config + view persistence ✅
+
+Toolbar **Save config…** prompts for a name and writes every currently
+displayed topic plus the live camera view to `<name>.toml` in the working
+directory, then shows the fully-resolved save path.
+
+- `config_writer::to_toml_full` gained a `Some(CameraSave)` argument that emits
+  a `[view]` table (`target`, `yaw`, `pitch`, `distance`).
+- `RosConfig` parses `[view]` into `Option<ViewConfig>`; on startup the app
+  restores the orbit camera from it, so a saved config reopens with the same
+  framing.
+- The save writes to `std::env::current_dir()`, canonicalizes the result, and
+  reports `Saved to <abs path>`.
+
+### 0.5.18 — TF interpolation ✅
+
+`TfTree` keeps a bounded per-frame sample history (`MAX_SAMPLES = 100`,
+ascending stamp, decomposed into `Quat`/`Vec3`).
+
+- `lookup_at(target, source, stamp_ns)` interpolates each hop between its
+  bracketing samples — **slerp** on rotation, **lerp** on translation — and
+  clamps to the nearest endpoint outside the recorded range. The stamp-free
+  `lookup` still returns the latest transform.
+- The laser and pointcloud subscribers now look up at `header.stamp` and bind
+  to the TF-refresh registry via `register_at(..., Some(stamp_ns))`, so the
+  per-tick refresh re-evaluates them at their own message time rather than
+  snapping to the newest TF.
+- Unit tests cover translation midpoint, range clamping, rotation slerp,
+  history bounding, and out-of-order insertion.
+
 ---
 
 ## Conventions
@@ -554,7 +609,6 @@ list panel is meaningful. Visibility toggles route through
 - Plugin system → M4.
 - `rclrs` work.
 - Wayland-native windowing.
-- TF interpolation (added only if jitter is visible).
 
 ---
 

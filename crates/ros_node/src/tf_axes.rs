@@ -154,11 +154,14 @@ mod tests {
     use scene::SceneGraph;
 
     fn translation_entry(parent: &str, t: Vec3) -> TransformEntry {
-        TransformEntry {
-            parent: parent.into(),
-            xform: Mat4::from_translation(t),
-            stamp_ns: 0,
-        }
+        TransformEntry::from_sample(
+            parent.into(),
+            crate::tf::TfSample {
+                stamp_ns: 0,
+                rot: glam::Quat::IDENTITY,
+                trans: t,
+            },
+        )
     }
 
     #[test]

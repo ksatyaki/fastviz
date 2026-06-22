@@ -80,6 +80,19 @@ pub struct RosConfig {
     /// Side-panel grouping. Each group renders as a collapsible egui section
     /// in the order it appears here. Empty = current flat list behavior.
     pub ui_groups: Vec<UiGroup>,
+    /// Saved camera framing (`[view]`). When `Some`, the app restores the orbit
+    /// camera to this pose at startup, the way RViz reopens a saved view.
+    pub view: Option<ViewConfig>,
+}
+
+/// Persisted orbit-camera pose. Written by the "Save config" button and read
+/// back at startup. Angles are radians; `target` is in renderer-world coords.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewConfig {
+    pub target: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
 }
 
 /// One side-panel group. Entities are matched by exact label (topic name) and
@@ -255,6 +268,7 @@ impl Default for RosConfig {
             marker_array_qos: HashMap::new(),
             joint_states_qos: None,
             ui_groups: Vec::new(),
+            view: None,
         }
     }
 }
@@ -294,6 +308,17 @@ pub struct RawConfig {
     pub urdf: Option<RawUrdf>,
     pub tf: Option<RawTf>,
     pub ui: Option<RawUi>,
+    pub view: Option<RawView>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawView {
+    /// Orbit target in renderer-world coords. Defaults to the origin.
+    pub target: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -442,6 +467,7 @@ impl RawConfig {
             urdf,
             tf,
             ui,
+            view,
         } = self;
 
         let (map_topic, map_qos) = match map {
@@ -568,6 +594,13 @@ impl RawConfig {
             })
             .unwrap_or_default();
 
+        let view = view.map(|v| ViewConfig {
+            target: v.target,
+            yaw: v.yaw,
+            pitch: v.pitch,
+            distance: v.distance,
+        });
+
         RosConfig {
             node_name: node_name.unwrap_or(d.node_name),
             namespace: namespace.unwrap_or(d.namespace),
@@ -605,6 +638,7 @@ impl RawConfig {
             marker_array_qos,
             joint_states_qos,
             ui_groups,
+            view,
         }
     }
 }
@@ -813,6 +847,30 @@ mod tests {
         assert_eq!(cfg.ui_groups[1].name, "Robot Description");
         assert!(cfg.ui_groups[1].urdf);
         assert!(cfg.ui_groups[1].collapsed);
+    }
+
+    #[test]
+    fn view_section_parses() {
+        let toml = r#"
+            [view]
+            target = [1.0, 2.0, 3.0]
+            yaw = 0.5
+            pitch = 0.7
+            distance = 12.0
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        let v = cfg.view.expect("view present");
+        assert_eq!(v.target, [1.0, 2.0, 3.0]);
+        assert!((v.yaw - 0.5).abs() < 1e-6);
+        assert!((v.pitch - 0.7).abs() < 1e-6);
+        assert!((v.distance - 12.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn view_absent_when_omitted() {
+        let raw: RawConfig = toml::from_str("").unwrap();
+        assert!(raw.into_runtime().view.is_none());
     }
 
     #[test]

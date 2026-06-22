@@ -64,6 +64,8 @@ struct AppContext {
     reference_frame: String,
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
     discoverer: ui::TopicDiscovererState,
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    save_config: ui::SaveConfigState,
     /// Per-entity color/scale text-edit buffers. Lives outside egui memory so
     /// it survives across panel rebuilds without keying on internal egui ids.
     edit_state: ui::EntityEditState,
@@ -172,7 +174,8 @@ impl ApplicationHandler for App {
         };
 
         let size = window.inner_size();
-        let renderer = match pollster::block_on(Renderer::new(
+        #[cfg_attr(not(feature = "ros"), allow(unused_mut))]
+        let mut renderer = match pollster::block_on(Renderer::new(
             window.clone(),
             size.width,
             size.height,
@@ -205,7 +208,7 @@ impl ApplicationHandler for App {
         };
 
         #[cfg(feature = "ros")]
-        let (ros, ui_groups, reference_frame, active_topics, cfg_tf_axis_length) = {
+        let (ros, ui_groups, reference_frame, active_topics, cfg_tf_axis_length, cfg_view) = {
             let mut cfg = match self.args.config.as_deref() {
                 Some(p) => match ros_node::RosConfig::from_path(p) {
                     Ok(c) => {
@@ -250,6 +253,7 @@ impl ApplicationHandler for App {
                 }
             }
             let tf_axis_len = cfg.tf_axis_length;
+            let view = cfg.view;
             let n = match ros_node::RosNode::spawn(scene.clone(), cfg) {
                 Ok(n) => Some(n),
                 Err(e) => {
@@ -257,7 +261,7 @@ impl ApplicationHandler for App {
                     None
                 }
             };
-            (n, groups, reference_frame, active, tf_axis_len)
+            (n, groups, reference_frame, active, tf_axis_len, view)
         };
         #[cfg(not(feature = "ros"))]
         let ui_groups: Vec<ui::UiGroupView> = Vec::new();
@@ -265,6 +269,17 @@ impl ApplicationHandler for App {
         let reference_frame: String = self.args.ref_frame.clone();
         #[cfg(not(feature = "ros"))]
         let active_topics: Vec<String> = Vec::new();
+
+        // Restore a saved camera view (`[view]` in the config), the way RViz
+        // reopens a saved framing.
+        #[cfg(feature = "ros")]
+        if let Some(v) = cfg_view {
+            let cam = &mut renderer.camera;
+            cam.target = glam::Vec3::from_array(v.target);
+            cam.yaw = v.yaw;
+            cam.pitch = v.pitch;
+            cam.distance = v.distance;
+        }
 
         window.request_redraw();
 
@@ -290,8 +305,7 @@ impl ApplicationHandler for App {
         #[cfg(not(feature = "ros"))]
         let initial_tf_scale = 0.3;
 
-        let mut discoverer = ui::TopicDiscovererState::default();
-        discoverer.filename = "configs/discovered.toml".to_string();
+        let discoverer = ui::TopicDiscovererState::default();
 
         self.ctx = Some(AppContext {
             window,
@@ -306,6 +320,7 @@ impl ApplicationHandler for App {
             tf_axis_length: initial_tf_scale,
             reference_frame,
             discoverer,
+            save_config: ui::SaveConfigState::default(),
             edit_state: ui::EntityEditState::default(),
             active_topics,
             input: InputState::default(),
@@ -473,6 +488,9 @@ impl AppContext {
             reference_frame: self.reference_frame.as_str(),
             active_topics: self.active_topics.as_slice(),
         });
+        // Live "Add topic" requests the UI collects this frame.
+        #[cfg(feature = "ros")]
+        let mut add_requests: Vec<(String, ros_node::TopicKind)> = Vec::new();
         let full_output = {
             let window = self.window.clone();
             let scene = self.scene.clone();
@@ -481,9 +499,12 @@ impl AppContext {
             let groups = &mut self.ui_groups;
             let tf_len = &mut self.tf_axis_length;
             let discoverer = &mut self.discoverer;
+            let save_config = &mut self.save_config;
             let edit_state = &mut self.edit_state;
             let follow = &mut self.follow_frame;
             let theme_mode = &mut self.theme;
+            #[cfg(feature = "ros")]
+            let add_requests = &mut add_requests;
             self.egui.run_ui(&window, |egui_ctx| {
                 let before = *theme_mode;
                 let mut scene = scene.write();
@@ -497,11 +518,14 @@ impl AppContext {
                     groups,
                     tf_len,
                     discoverer,
+                    save_config,
                     edit_state,
                     follow,
                     theme_mode,
                     #[cfg(feature = "ros")]
                     topic_ctx,
+                    #[cfg(feature = "ros")]
+                    add_requests,
                 );
                 if *theme_mode != before {
                     theme::apply(egui_ctx, *theme_mode);
@@ -509,6 +533,20 @@ impl AppContext {
                 }
             })
         };
+
+        // Forward any live-add requests to the ROS node and record them as
+        // active so they appear "added" and get included in a saved config.
+        #[cfg(feature = "ros")]
+        if !add_requests.is_empty() {
+            if let Some(n) = self.ros.as_ref() {
+                for (topic, kind) in &add_requests {
+                    n.request_add_topic(topic.clone(), *kind);
+                    if !self.active_topics.iter().any(|t| t == topic) {
+                        self.active_topics.push(topic.clone());
+                    }
+                }
+            }
+        }
 
         // Apply follow-frame: snap camera target to the TF frame's current
         // world position. The frame's entity transform already takes the frame

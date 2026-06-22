@@ -45,6 +45,32 @@ pub fn spawn(
     )
 }
 
+/// Map subscriber for a runtime-chosen topic (the "Add" dialog). Uses the
+/// opaque occupancy colormap and the singleton `ROS_ID_MAP` entity, so it
+/// replaces whatever map slot was previously empty.
+pub fn spawn_map_topic(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: SceneHandle,
+    tf: Arc<TfTree>,
+    reference_frame: String,
+    topic: String,
+    qos_override: Option<QosOverride>,
+) -> Result<()> {
+    spawn_grid(
+        node,
+        spawner,
+        scene,
+        tf,
+        reference_frame,
+        topic,
+        ROS_ID_MAP,
+        Colormap::OccupancyDefault,
+        "map",
+        qos_override,
+    )
+}
+
 /// Costmap-overlay subscriber: per-topic entity, rendered with the cost
 /// colormap (free/unknown transparent) so it layers on top of `/map`.
 #[allow(clippy::too_many_arguments)]

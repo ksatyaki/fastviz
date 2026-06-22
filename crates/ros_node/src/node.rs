@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use futures::executor::{LocalPool, LocalSpawner};
 use futures::stream::StreamExt;
 use futures::task::LocalSpawnExt;
@@ -17,6 +17,7 @@ use r2r::QosProfile;
 use scene::SceneHandle;
 
 use crate::config::RosConfig;
+use crate::config_writer::TopicKind;
 use crate::stats::RosStats;
 use crate::subscribers;
 use crate::tf::TfTree;
@@ -38,6 +39,9 @@ pub struct RosNode {
     /// Latest topic-graph snapshot, refreshed roughly once per second by the
     /// executor. Used by the UI's topic discoverer.
     topics: TopicsSnapshot,
+    /// Runtime "Add topic" requests from the UI. The executor drains this each
+    /// spin and spawns the matching subscriber (RViz-style live add).
+    add_topic: Sender<(String, TopicKind)>,
 }
 
 impl RosNode {
@@ -50,6 +54,7 @@ impl RosNode {
         let tf_axis_length_thread = tf_axis_length.clone();
         let topics: TopicsSnapshot = Arc::new(RwLock::new(Vec::new()));
         let topics_thread = topics.clone();
+        let (add_tx, add_rx) = unbounded::<(String, TopicKind)>();
         let handle = thread::Builder::new()
             .name("ros2-executor".into())
             .spawn(move || {
@@ -60,6 +65,7 @@ impl RosNode {
                     stats_thread,
                     tf_axis_length_thread,
                     topics_thread,
+                    add_rx,
                 ) {
                     log::error!("ros2 executor exited with error: {e:#}");
                 }
@@ -71,7 +77,17 @@ impl RosNode {
             stats,
             tf_axis_length,
             topics,
+            add_topic: add_tx,
         })
+    }
+
+    /// Request a live subscription to `topic` as `kind`. Non-blocking; the
+    /// executor picks it up on its next spin. A double-add is harmless — the
+    /// subscriber registry ignores topics it already owns.
+    pub fn request_add_topic(&self, topic: String, kind: TopicKind) {
+        if let Err(e) = self.add_topic.send((topic, kind)) {
+            log::warn!("add-topic request dropped (executor gone): {e}");
+        }
     }
 
     /// Cross-thread counters (e.g. PC2 messages received). Cheap atomic loads.
@@ -108,6 +124,7 @@ impl Drop for RosNode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     scene: SceneHandle,
     cfg: RosConfig,
@@ -115,6 +132,7 @@ fn run(
     stats: Arc<RosStats>,
     tf_axis_length: Arc<AtomicU32>,
     topics: TopicsSnapshot,
+    add_topic: Receiver<(String, TopicKind)>,
 ) -> Result<()> {
     let ctx = r2r::Context::create().context("r2r::Context::create")?;
     let mut node =
@@ -196,6 +214,24 @@ fn run(
             node.spin_once(Duration::ZERO);
         }
         pool.run_until_stalled();
+
+        // Drain runtime "Add topic" requests from the UI and spawn each one.
+        while let Ok((topic, kind)) = add_topic.try_recv() {
+            if let Err(e) = subscribers::discovery::spawn_for_kind(
+                &mut node,
+                &spawner,
+                &scene,
+                &tf_tree,
+                &tf_refresh,
+                &cfg,
+                &mut registry,
+                &stats,
+                &topic,
+                kind,
+            ) {
+                log::warn!("failed to add topic {topic}: {e:#}");
+            }
+        }
 
         // Late URDF arrival (from the /robot_description-style topic): consume
         // the first message, parse, spawn entities + JointState subscriber.

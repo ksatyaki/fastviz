@@ -197,6 +197,58 @@ pub fn tick(
     Ok(())
 }
 
+/// Spawn a subscriber for a single `topic` of a known [`TopicKind`], on demand
+/// (the "Add" dialog). Idempotent per topic: the registry guards against a
+/// double-subscribe. An OccupancyGrid lands in the singleton map slot if it's
+/// still free, otherwise as a costmap overlay so it doesn't clobber an existing
+/// map.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_for_kind(
+    node: &mut r2r::Node,
+    spawner: &LocalSpawner,
+    scene: &SceneHandle,
+    tf: &Arc<TfTree>,
+    tf_refresh: &Arc<TfRegistry>,
+    cfg: &RosConfig,
+    reg: &mut Registry,
+    stats: &Arc<RosStats>,
+    topic: &str,
+    kind: crate::config_writer::TopicKind,
+) -> Result<()> {
+    use crate::config_writer::TopicKind;
+    match kind {
+        TopicKind::Map => {
+            if reg.map_spawned {
+                spawn_costmap(node, spawner, scene, tf, cfg, reg, topic)?;
+            } else {
+                occupancy::spawn_map_topic(
+                    node,
+                    spawner,
+                    scene.clone(),
+                    tf.clone(),
+                    cfg.reference_frame.clone(),
+                    topic.to_string(),
+                    cfg.map_qos.get(topic).cloned(),
+                )?;
+                reg.map_spawned = true;
+                log::info!("added map topic at runtime: {topic}");
+            }
+        }
+        TopicKind::Pose => spawn_pose(node, spawner, scene, tf, cfg, reg, topic)?,
+        TopicKind::PoseArray => spawn_pose_array(node, spawner, scene, tf, cfg, reg, topic)?,
+        TopicKind::Path => spawn_path(node, spawner, scene, tf, cfg, reg, topic)?,
+        TopicKind::Scan => spawn_scan(node, spawner, scene, tf, tf_refresh, cfg, reg, topic)?,
+        TopicKind::PointCloud => {
+            spawn_pointcloud(node, spawner, scene, tf, tf_refresh, cfg, reg, stats, topic)?
+        }
+        TopicKind::Marker => spawn_marker(node, spawner, scene, tf, tf_refresh, cfg, reg, topic)?,
+        TopicKind::MarkerArray => {
+            spawn_marker_array(node, spawner, scene, tf, tf_refresh, cfg, reg, topic)?
+        }
+    }
+    Ok(())
+}
+
 fn has_wildcard(cfg: &RosConfig) -> bool {
     [
         &cfg.costmap_topics,

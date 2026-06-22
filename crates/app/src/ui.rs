@@ -1,6 +1,8 @@
 //! Egui panel layout: top toolbar + left entity list.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(feature = "ros")]
+use std::collections::HashSet;
 
 use egui::{Align, Color32, FontFamily, FontId, Layout, RichText};
 use renderer::{FrameStats, OrbitCamera};
@@ -233,19 +235,26 @@ impl UiGroupView {
     }
 }
 
-/// Persistent state for the "Topics" / "Save current config" window. Owned by
-/// the app so the user's selection survives across frames.
+/// Persistent state for the "Add topics" window (RViz-style live subscribe).
+/// Owned by the app so the window's fold state survives across frames.
 #[cfg_attr(not(feature = "ros"), allow(dead_code))]
 #[derive(Default)]
 pub struct TopicDiscovererState {
     pub open: bool,
-    pub filename: String,
-    pub selected: HashSet<String>,
-    /// One-line status message rendered under the save button.
+    /// One-line status message rendered under the topic tree.
     pub status: Option<String>,
-    /// True once we've pre-populated `selected` from the live config; gated so
-    /// re-opening the window doesn't clobber user-driven edits.
-    pub primed: bool,
+}
+
+/// Persistent state for the "Save config" window. Owned by the app so the
+/// typed filename and last status survive across frames.
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+#[derive(Default)]
+pub struct SaveConfigState {
+    pub open: bool,
+    /// Config name the user types (without extension); saved to the CWD.
+    pub name: String,
+    /// One-line status (resolved save path or error) under the Save button.
+    pub status: Option<String>,
 }
 
 /// Inputs the topic discoverer needs from outside.
@@ -276,10 +285,14 @@ pub fn draw(
     groups: &mut [UiGroupView],
     tf_axis_length: &mut f32,
     discoverer: &mut TopicDiscovererState,
+    save_state: &mut SaveConfigState,
     edit_state: &mut EntityEditState,
     follow_frame: &mut Option<String>,
     theme_mode: &mut theme::Mode,
     #[cfg(feature = "ros")] topic_ctx: Option<TopicDiscovererCtx<'_>>,
+    // `add_requests`: live "Add topic" requests collected this frame; the app
+    // forwards them to the ROS node and appends them to the active-topic set.
+    #[cfg(feature = "ros")] add_requests: &mut Vec<(String, ros_node::TopicKind)>,
 ) {
     // Build the list of TF frames currently in the scene for the follow-frame
     // dropdown. Cheap — there are typically tens of frames.
@@ -342,13 +355,25 @@ pub fn draw(
                 #[cfg(feature = "ros")]
                 {
                     ui.separator();
-                    if ui.button("Save config…").clicked() {
+                    if ui
+                        .button("Add")
+                        .on_hover_text("Subscribe to a topic on the live ROS graph")
+                        .clicked()
+                    {
                         discoverer.open = !discoverer.open;
+                    }
+                    if ui
+                        .button("Save config…")
+                        .on_hover_text("Save displayed topics + current view to a config file")
+                        .clicked()
+                    {
+                        save_state.open = !save_state.open;
                     }
                 }
                 #[cfg(not(feature = "ros"))]
                 {
                     let _ = &discoverer;
+                    let _ = &save_state;
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Theme toggle — sun in dark mode (click to go light),
@@ -467,163 +492,278 @@ pub fn draw(
 
     #[cfg(feature = "ros")]
     if let Some(tctx) = topic_ctx {
-        draw_topic_discoverer(ctx, discoverer, tctx, scene, groups, *tf_axis_length);
+        draw_add_topics(ctx, discoverer, tctx, add_requests);
+        draw_save_config(ctx, save_state, tctx, scene, groups, *tf_axis_length, camera);
     }
 }
 
+/// A namespace tree built from supported topic names, split on `/`. Each node
+/// holds child namespaces (sorted) and the leaf topics that live directly at
+/// this level. Lets the Add window collapse `/robot1/...` and add a whole
+/// subtree or a single topic.
 #[cfg(feature = "ros")]
-fn draw_topic_discoverer(
+#[derive(Default)]
+struct NsNode {
+    children: std::collections::BTreeMap<String, NsNode>,
+    /// `(full_topic, kind)` for leaves directly at this level.
+    leaves: Vec<(String, ros_node::TopicKind)>,
+}
+
+#[cfg(feature = "ros")]
+impl NsNode {
+    fn insert(&mut self, topic: &str, kind: ros_node::TopicKind) {
+        let segments: Vec<&str> = topic.trim_start_matches('/').split('/').collect();
+        let mut node = self;
+        // Descend through every segment except the last (the leaf name).
+        for seg in &segments[..segments.len().saturating_sub(1)] {
+            node = node.children.entry((*seg).to_string()).or_default();
+        }
+        node.leaves.push((topic.to_string(), kind));
+    }
+
+    /// Total leaf count in this subtree.
+    fn leaf_count(&self) -> usize {
+        self.leaves.len() + self.children.values().map(NsNode::leaf_count).sum::<usize>()
+    }
+
+    /// Collect every leaf in this subtree not already in `active` into `out`.
+    fn collect_leaves(&self, active: &HashSet<&str>, out: &mut Vec<(String, ros_node::TopicKind)>) {
+        for (topic, kind) in &self.leaves {
+            if !active.contains(topic.as_str()) {
+                out.push((topic.clone(), *kind));
+            }
+        }
+        for child in self.children.values() {
+            child.collect_leaves(active, out);
+        }
+    }
+}
+
+/// "Add topics" window — RViz-style live subscribe. Supported topics are shown
+/// first as a collapsible namespace tree (collapsed by default); each namespace
+/// can add its whole subtree, each leaf can be added individually. Unsupported
+/// topics are tucked into a collapsed section at the bottom.
+#[cfg(feature = "ros")]
+fn draw_add_topics(
     ctx: &egui::Context,
     state: &mut TopicDiscovererState,
     tctx: TopicDiscovererCtx<'_>,
-    scene: &SceneGraph,
-    groups: &[UiGroupView],
-    tf_axis_length: f32,
+    add_requests: &mut Vec<(String, ros_node::TopicKind)>,
 ) {
-    // Pre-populate `selected` with the topics currently being subscribed to,
-    // the first time the window is opened. Subsequent re-opens keep the user's
-    // edits so they aren't lost on a stray toggle.
-    if state.open && !state.primed {
-        state.selected.clear();
-        for t in tctx.active_topics {
-            state.selected.insert(t.clone());
-        }
-        state.primed = true;
-    }
-    if !state.open {
-        state.primed = false;
-    }
-
     let mut open = state.open;
-    egui::Window::new("Save current config")
+    egui::Window::new("Add topics")
         .resizable(true)
         .default_width(460.0)
-        .default_height(420.0)
+        .default_height(440.0)
         .open(&mut open)
         .show(ctx, |ui| {
             let snapshot: Vec<(String, Vec<String>)> = tctx.topics.read().clone();
+            let active: HashSet<&str> =
+                tctx.active_topics.iter().map(String::as_str).collect();
+
+            // Partition into supported (build a namespace tree) and unsupported.
+            let mut root = NsNode::default();
+            let mut supported_count = 0usize;
+            let mut unsupported: Vec<(&str, String)> = Vec::new();
+            for (topic, types) in &snapshot {
+                match ros_node::TopicKind::from_types(types) {
+                    Some(kind) => {
+                        root.insert(topic, kind);
+                        supported_count += 1;
+                    }
+                    None => {
+                        let ty = types.first().cloned().unwrap_or_default();
+                        unsupported.push((topic.as_str(), ty));
+                    }
+                }
+            }
+
             ui.label(format!(
-                "Discovered {} topic(s) on the ROS graph. Pre-checked rows are already in the current view.",
-                snapshot.len()
+                "{} topic(s) on the ROS graph — {supported_count} supported, {} unsupported.",
+                snapshot.len(),
+                unsupported.len()
             ));
-            ui.label(
-                "Tick the topics you want in the saved config. Per-entity color and scale tweaks \
-                 from the sidebar are baked into the per-kind style on save.",
-            );
+            ui.label("Add subscribes live; topics already shown are marked “added”.");
             ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button("Select all supported").clicked() {
-                    for (t, types) in &snapshot {
-                        if ros_node::TopicKind::from_types(types).is_some() {
-                            state.selected.insert(t.clone());
-                        }
-                    }
-                }
-                if ui.button("Reset to current view").clicked() {
-                    state.selected.clear();
-                    for t in tctx.active_topics {
-                        state.selected.insert(t.clone());
-                    }
-                }
-                if ui.button("Clear").clicked() {
-                    state.selected.clear();
-                }
-            });
+            if ui
+                .button("Add all supported")
+                .on_hover_text("Subscribe to every supported topic not already shown")
+                .clicked()
+            {
+                root.collect_leaves(&active, add_requests);
+            }
             ui.separator();
+
             egui::ScrollArea::vertical()
-                .max_height(220.0)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    egui::Grid::new("topic_grid")
-                        .striped(true)
-                        .num_columns(3)
-                        .spacing([8.0, 2.0])
+                    draw_ns_node(ui, &root, "", &active, add_requests);
+                    if !unsupported.is_empty() {
+                        ui.add_space(4.0);
+                        egui::CollapsingHeader::new(format!(
+                            "Unsupported  ({})",
+                            unsupported.len()
+                        ))
+                        .id_salt("add_unsupported")
+                        .default_open(false)
                         .show(ui, |ui| {
-                            for (topic, types) in &snapshot {
-                                let kind = ros_node::TopicKind::from_types(types);
-                                let supported = kind.is_some();
-                                let mut checked = state.selected.contains(topic);
-                                let resp = ui.add_enabled(
-                                    supported,
-                                    egui::Checkbox::new(&mut checked, ""),
+                            unsupported.sort_by(|a, b| a.0.cmp(b.0));
+                            for (topic, ty) in &unsupported {
+                                ui.label(
+                                    RichText::new(format!("{topic}  ·  {ty}"))
+                                        .weak(),
                                 );
-                                if resp.changed() {
-                                    if checked {
-                                        state.selected.insert(topic.clone());
-                                    } else {
-                                        state.selected.remove(topic);
-                                    }
-                                }
-                                ui.label(topic);
-                                let kind_str = match kind {
-                                    Some(k) => k.label().to_string(),
-                                    None => {
-                                        let head =
-                                            types.first().cloned().unwrap_or_default();
-                                        format!("{head} (unsupported)")
-                                    }
-                                };
-                                ui.label(kind_str);
-                                ui.end_row();
                             }
                         });
+                    }
                 });
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Save as:");
-                if state.filename.is_empty() {
-                    state.filename = "configs/discovered.toml".to_string();
-                }
-                ui.add(
-                    egui::TextEdit::singleline(&mut state.filename)
-                        .desired_width(260.0)
-                        .hint_text("configs/discovered.toml"),
-                );
-                let save_clicked = ui.button("Save to TOML").clicked();
-                if save_clicked {
-                    let selected: Vec<String> =
-                        state.selected.iter().cloned().collect();
-                    let ui_groups_for_save = groups_for_save(groups);
-                    let toml = ros_node::config_to_toml_full(
-                        &snapshot,
-                        &selected,
-                        tctx.reference_frame,
-                        scene,
-                        tf_axis_length,
-                        &ui_groups_for_save,
-                    );
-                    let path = std::path::PathBuf::from(state.filename.trim());
-                    if let Some(parent) = path.parent() {
-                        if !parent.as_os_str().is_empty() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                    }
-                    match std::fs::write(&path, toml) {
-                        Ok(()) => {
-                            state.status = Some(format!(
-                                "saved {} topic(s) to {}",
-                                selected.len(),
-                                path.display()
-                            ));
-                            log::info!(
-                                "wrote {} topic selection(s) to {}",
-                                selected.len(),
-                                path.display()
-                            );
-                        }
-                        Err(e) => {
-                            state.status =
-                                Some(format!("save failed: {e}"));
-                            log::error!("topic discoverer save failed: {e}");
-                        }
-                    }
-                }
-            });
+
             if let Some(msg) = &state.status {
+                ui.separator();
                 ui.label(msg);
             }
         });
     state.open = open;
+    if !add_requests.is_empty() {
+        state.status = Some(format!("added {} topic(s)", add_requests.len()));
+    }
+}
+
+/// Recursively render one namespace level: child namespaces (each collapsible,
+/// default-closed, with an "add all" affordance) then the leaf topics.
+#[cfg(feature = "ros")]
+fn draw_ns_node(
+    ui: &mut egui::Ui,
+    node: &NsNode,
+    prefix: &str,
+    active: &HashSet<&str>,
+    add_requests: &mut Vec<(String, ros_node::TopicKind)>,
+) {
+    for (seg, child) in &node.children {
+        let ns_path = format!("{prefix}/{seg}");
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("+ all")
+                .on_hover_text(format!("Add every supported topic under {ns_path}/"))
+                .clicked()
+            {
+                child.collect_leaves(active, add_requests);
+            }
+            egui::CollapsingHeader::new(format!("{seg}/  ({})", child.leaf_count()))
+                .id_salt(("add_ns", ns_path.as_str()))
+                .default_open(false)
+                .show(ui, |ui| {
+                    draw_ns_node(ui, child, &ns_path, active, add_requests);
+                });
+        });
+    }
+    for (topic, kind) in &node.leaves {
+        let leaf = topic.rsplit('/').next().unwrap_or(topic.as_str());
+        ui.horizontal(|ui| {
+            if active.contains(topic.as_str()) {
+                ui.add_enabled(false, egui::Button::new("added").small());
+            } else if ui.small_button("Add").clicked() {
+                add_requests.push((topic.clone(), *kind));
+            }
+            ui.label(format!("{leaf}  ·  {}", kind.label()));
+        });
+    }
+}
+
+/// "Save config" window — prompt for a name, then write all displayed topics
+/// plus the current view transform to `<name>.toml` in the working directory.
+#[cfg(feature = "ros")]
+fn draw_save_config(
+    ctx: &egui::Context,
+    state: &mut SaveConfigState,
+    tctx: TopicDiscovererCtx<'_>,
+    scene: &SceneGraph,
+    groups: &[UiGroupView],
+    tf_axis_length: f32,
+    camera: &OrbitCamera,
+) {
+    let mut open = state.open;
+    egui::Window::new("Save config")
+        .resizable(false)
+        .default_width(420.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(
+                "Saves every displayed topic and the current camera view to a \
+                 config file in the working directory.",
+            );
+            ui.separator();
+            if state.name.is_empty() {
+                state.name = "fastviz".to_string();
+            }
+            let mut save_clicked = false;
+            ui.horizontal(|ui| {
+                ui.label("Name:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.name)
+                        .desired_width(220.0)
+                        .hint_text("fastviz"),
+                );
+                save_clicked = (resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Save").clicked();
+                ui.label(".toml");
+            });
+            if save_clicked {
+                let selected: Vec<String> = tctx.active_topics.to_vec();
+                let ui_groups_for_save = groups_for_save(groups);
+                let snapshot: Vec<(String, Vec<String>)> = tctx.topics.read().clone();
+                let cam = ros_node::CameraSave {
+                    target: camera.target.to_array(),
+                    yaw: camera.yaw,
+                    pitch: camera.pitch,
+                    distance: camera.distance,
+                };
+                let toml = ros_node::config_to_toml_full(
+                    &snapshot,
+                    &selected,
+                    tctx.reference_frame,
+                    scene,
+                    tf_axis_length,
+                    &ui_groups_for_save,
+                    Some(cam),
+                );
+                state.status = Some(save_config_file(&state.name, &toml, selected.len()));
+            }
+            if let Some(msg) = &state.status {
+                ui.separator();
+                ui.label(msg);
+            }
+        });
+    state.open = open;
+}
+
+/// Write `toml` to `<name>.toml` in the current working directory and return a
+/// status line quoting the fully-resolved path (or the error).
+#[cfg(feature = "ros")]
+fn save_config_file(name: &str, toml: &str, topic_count: usize) -> String {
+    let trimmed = name.trim();
+    let stem = trimmed.strip_suffix(".toml").unwrap_or(trimmed);
+    let stem = if stem.is_empty() { "fastviz" } else { stem };
+    let filename = format!("{stem}.toml");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let path = cwd.join(&filename);
+    match std::fs::write(&path, toml) {
+        Ok(()) => {
+            // Resolve symlinks/.. for an unambiguous message; fall back to the
+            // joined path if canonicalize fails (it shouldn't, post-write).
+            let resolved = std::fs::canonicalize(&path).unwrap_or(path);
+            log::info!(
+                "saved {topic_count} displayed topic(s) + view to {}",
+                resolved.display()
+            );
+            format!("Saved to {}", resolved.display())
+        }
+        Err(e) => {
+            log::error!("save config failed: {e}");
+            format!("Save failed: {e}")
+        }
+    }
 }
 
 /// Build the lightweight `UiGroupSave` list the config writer wants from the
