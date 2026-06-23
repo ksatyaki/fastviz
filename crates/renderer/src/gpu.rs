@@ -14,9 +14,22 @@ pub struct GpuContext {
     pub surface_config: wgpu::SurfaceConfiguration,
     pub depth_view: wgpu::TextureView,
     pub depth_format: wgpu::TextureFormat,
+    /// MSAA sample count used by every 3D pipeline and the depth buffer. Either
+    /// [`MSAA_SAMPLES`] (when the adapter supports it for the surface format) or
+    /// `1` (no anti-aliasing). All render pipelines must build with this value.
+    pub sample_count: u32,
+    /// Multisampled color render target. `Some` when `sample_count > 1`: the 3D
+    /// pass renders into this and resolves into the swapchain texture. `None`
+    /// when MSAA is unavailable, in which case passes render straight to the
+    /// swapchain.
+    pub msaa_view: Option<wgpu::TextureView>,
 }
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Preferred MSAA level. 4× is broadly supported and a good quality/cost
+/// trade-off; we fall back to no MSAA if the adapter can't do it.
+pub const MSAA_SAMPLES: u32 = 4;
 
 impl GpuContext {
     /// Build a `GpuContext` against the given surface target. The target must
@@ -94,7 +107,23 @@ impl GpuContext {
         };
         surface.configure(&device, &surface_config);
 
-        let depth_view = create_depth_view(&device, width.max(1), height.max(1));
+        // Pick an MSAA level the adapter can actually back for this format.
+        let sample_count = if surface_format_supports_msaa(&adapter, surface_format, MSAA_SAMPLES) {
+            MSAA_SAMPLES
+        } else {
+            log::info!("MSAA x{MSAA_SAMPLES} unsupported for {surface_format:?}; disabling AA");
+            1
+        };
+
+        let depth_view =
+            create_depth_view(&device, width.max(1), height.max(1), sample_count);
+        let msaa_view = create_msaa_view(
+            &device,
+            width.max(1),
+            height.max(1),
+            surface_format,
+            sample_count,
+        );
 
         Ok(GpuContext {
             instance,
@@ -105,17 +134,26 @@ impl GpuContext {
             surface_config,
             depth_view,
             depth_format: DEPTH_FORMAT,
+            sample_count,
+            msaa_view,
         })
     }
 
-    /// Reconfigure the swapchain and depth buffer after a window resize.
+    /// Reconfigure the swapchain, depth buffer, and MSAA target after a resize.
     pub fn resize(&mut self, width: u32, height: u32) {
         let w = width.max(1);
         let h = height.max(1);
         self.surface_config.width = w;
         self.surface_config.height = h;
         self.surface.configure(&self.device, &self.surface_config);
-        self.depth_view = create_depth_view(&self.device, w, h);
+        self.depth_view = create_depth_view(&self.device, w, h, self.sample_count);
+        self.msaa_view = create_msaa_view(
+            &self.device,
+            w,
+            h,
+            self.surface_config.format,
+            self.sample_count,
+        );
     }
 
     pub fn aspect(&self) -> f32 {
@@ -132,7 +170,12 @@ impl GpuContext {
     }
 }
 
-fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+fn create_depth_view(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    sample_count: u32,
+) -> wgpu::TextureView {
     let depth = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("fastviz-depth"),
         size: wgpu::Extent3d {
@@ -141,13 +184,52 @@ fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     depth.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Multisampled color target the 3D pass resolves into the swapchain. Returns
+/// `None` when `sample_count == 1` (rendering goes straight to the swapchain).
+fn create_msaa_view(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    sample_count: u32,
+) -> Option<wgpu::TextureView> {
+    if sample_count <= 1 {
+        return None;
+    }
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fastviz-msaa-color"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    Some(tex.create_view(&wgpu::TextureViewDescriptor::default()))
+}
+
+/// Whether the adapter can multisample-render the given format at `samples`.
+fn surface_format_supports_msaa(
+    adapter: &wgpu::Adapter,
+    format: wgpu::TextureFormat,
+    samples: u32,
+) -> bool {
+    let flags = adapter.get_texture_format_features(format).flags;
+    flags.sample_count_supported(samples)
 }
 
 /// Type alias used by passes that want shared, cheap-clone handles.

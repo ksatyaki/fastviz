@@ -164,7 +164,10 @@ impl PointPass {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: gpu.sample_count,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });

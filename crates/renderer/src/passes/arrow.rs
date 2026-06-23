@@ -1,6 +1,13 @@
 //! Arrow pass: renders all `Arrow` and `Vec<Arrow>` entities. Geometry is a
-//! shared unit-arrow mesh (length 1, oriented along +X). Each arrow gets its
-//! own per-instance uniform buffer carrying a model matrix and color.
+//! shared unit-arrow mesh (length 1, oriented along +X), drawn with hardware
+//! instancing: every arrow is one element in a single per-instance vertex
+//! buffer (model matrix + color), and the whole scene's arrows go out in a
+//! single instanced draw call.
+//!
+//! Like [`PointPass`](super::point::PointPass), the prepared buffer is cached
+//! and only rebuilt + re-uploaded when `SceneGraph::revision` advances — so
+//! redrawing an unchanged scene (renderer running faster than producers
+//! publish) costs only the one draw call, with no CPU repack and no GPU upload.
 
 use std::mem::size_of;
 
@@ -12,7 +19,7 @@ use crate::gpu::{GpuContext, DEPTH_FORMAT};
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
-struct InstanceUniform {
+struct ArrowInstance {
     model: [[f32; 4]; 4],
     color: [f32; 4],
 }
@@ -24,42 +31,27 @@ pub struct ArrowPass {
     index_buffer: wgpu::Buffer,
     index_count: u32,
 
-    instance_bgl: wgpu::BindGroupLayout,
+    instance_buffer: wgpu::Buffer,
+    instance_capacity: usize,
     instances: Vec<ArrowInstance>,
-    /// Number of instances actually populated this frame.
-    live: usize,
-}
-
-struct ArrowInstance {
-    buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
+    /// Number of instances in `instance_buffer` to draw.
+    live: u32,
+    /// `Some(rev)` when the buffer reflects that scene revision; `None` until
+    /// the first prepare. Only a revision change triggers a rebuild + upload.
+    last_revision: Option<u64>,
 }
 
 impl ArrowPass {
     pub fn new(gpu: &GpuContext, camera_bgl: &wgpu::BindGroupLayout) -> Self {
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lit-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/lit.wgsl").into()),
-        });
-
-        let instance_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("instance-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
+            label: Some("arrow-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/arrow.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("arrow-pl"),
-            bind_group_layouts: &[camera_bgl, &instance_bgl],
+            bind_group_layouts: &[camera_bgl],
             push_constant_ranges: &[],
         });
 
@@ -70,15 +62,29 @@ impl ArrowPass {
                 module: &shader,
                 entry_point: "vs_main",
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3,
-                        1 => Float32x3,
-                        2 => Float32x2,
-                    ],
-                }],
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: size_of::<Vertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3,
+                            1 => Float32x3,
+                            2 => Float32x2,
+                        ],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: size_of::<ArrowInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        // model matrix columns (3..=6) + color (7).
+                        attributes: &wgpu::vertex_attr_array![
+                            3 => Float32x4,
+                            4 => Float32x4,
+                            5 => Float32x4,
+                            6 => Float32x4,
+                            7 => Float32x4,
+                        ],
+                    },
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -102,7 +108,10 @@ impl ArrowPass {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: gpu.sample_count,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -125,54 +134,64 @@ impl ArrowPass {
         gpu.queue
             .write_buffer(&index_buffer, 0, bytemuck::cast_slice(&idx));
 
+        let instance_capacity = 256usize;
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("arrow-instance-vb"),
+            size: (instance_capacity * size_of::<ArrowInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         ArrowPass {
             pipeline,
             vertex_buffer,
             index_buffer,
             index_count: idx.len() as u32,
-            instance_bgl,
+            instance_buffer,
+            instance_capacity,
             instances: Vec::new(),
             live: 0,
+            last_revision: None,
         }
     }
 
     pub fn prepare(&mut self, gpu: &GpuContext, scene: &SceneGraph) {
-        let mut data: Vec<InstanceUniform> = Vec::new();
+        let revision = scene.revision();
+        if self.last_revision == Some(revision) {
+            return; // scene unchanged — keep cached instance buffer + draw count
+        }
+        self.last_revision = Some(revision);
+
+        self.instances.clear();
         for entity in scene.entities.values() {
             if !entity.visible {
                 continue;
             }
             if let ScenePrimitive::Arrows(arrows) = &entity.primitive {
                 for a in arrows {
-                    data.push(arrow_instance(a, entity.transform));
+                    self.instances.push(arrow_instance(a, entity.transform));
                 }
             }
         }
+        self.live = self.instances.len() as u32;
 
-        // Grow the instance pool if needed.
-        while self.instances.len() < data.len() {
-            let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("arrow-instance-ub"),
-                size: size_of::<InstanceUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        // Grow the instance buffer if needed (power-of-two, like the point pass).
+        if self.instances.len() > self.instance_capacity {
+            self.instance_capacity = (self.instances.len() * 2).next_power_of_two();
+            self.instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("arrow-instance-vb"),
+                size: (self.instance_capacity * size_of::<ArrowInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("arrow-instance-bg"),
-                layout: &self.instance_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            });
-            self.instances.push(ArrowInstance { buffer, bind_group });
         }
-
-        for (i, inst) in data.iter().enumerate() {
-            gpu.queue
-                .write_buffer(&self.instances[i].buffer, 0, bytemuck::bytes_of(inst));
+        if !self.instances.is_empty() {
+            gpu.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&self.instances),
+            );
         }
-        self.live = data.len();
     }
 
     pub fn draw<'a>(
@@ -186,15 +205,13 @@ impl ArrowPass {
         rpass.set_pipeline(&self.pipeline);
         rpass.set_bind_group(0, camera_bg, &[]);
         rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        rpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         rpass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        for inst in &self.instances[..self.live] {
-            rpass.set_bind_group(1, &inst.bind_group, &[]);
-            rpass.draw_indexed(0..self.index_count, 0, 0..1);
-        }
+        rpass.draw_indexed(0..self.index_count, 0, 0..self.live);
     }
 }
 
-fn arrow_instance(a: &Arrow, parent: Mat4) -> InstanceUniform {
+fn arrow_instance(a: &Arrow, parent: Mat4) -> ArrowInstance {
     let dir = if a.direction.length_squared() < 1e-8 {
         Vec3::X
     } else {
@@ -205,7 +222,7 @@ fn arrow_instance(a: &Arrow, parent: Mat4) -> InstanceUniform {
     // We scale isotropically in cross-section by `shaft_radius * 2`.
     let scale = Vec3::new(a.length, a.shaft_radius * 2.0, a.shaft_radius * 2.0);
     let local = Mat4::from_scale_rotation_translation(scale, rot, a.origin);
-    InstanceUniform {
+    ArrowInstance {
         model: (parent * local).to_cols_array_2d(),
         color: a.color.to_array(),
     }

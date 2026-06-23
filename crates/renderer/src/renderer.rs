@@ -127,11 +127,19 @@ impl Renderer {
                 });
 
         {
+            // With MSAA, the 3D pass renders into the multisampled target and
+            // resolves into the swapchain texture; egui then draws onto the
+            // resolved (single-sample) `view`. Without MSAA we render straight
+            // to the swapchain.
+            let (color_view, resolve_target) = match &self.gpu.msaa_view {
+                Some(msaa) => (msaa, Some(&view)),
+                None => (&view, None),
+            };
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("3d-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: color_view,
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
                             r: 0.07,
