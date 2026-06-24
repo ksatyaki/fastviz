@@ -1,20 +1,34 @@
 //! Line pass: renders all `Polyline` and `Frame` (3-axis) entities from the
-//! scene graph as a single line-list draw.
-//!
-//! For now we rebuild the vertex buffer every frame. We can move to per-entity
-//! buffers + dirty tracking once the workload demands it.
+//! scene graph as instanced quads to support configurable line thickness.
 
 use glam::{Vec3, Vec4};
 use scene::{Color, SceneGraph, ScenePrimitive};
+use std::mem::size_of;
 
-use super::LineVertex;
 use crate::gpu::{GpuContext, DEPTH_FORMAT};
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct QuadVertex {
+    position: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct LineInstance {
+    start: [f32; 3],
+    end: [f32; 3],
+    color: [f32; 4],
+    thickness: f32,
+}
 
 pub struct LinePass {
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
+    quad_vertex_buffer: wgpu::Buffer,
+    quad_index_buffer: wgpu::Buffer,
+    instance_buffer: wgpu::Buffer,
     capacity: usize,
-    vertex_count: u32,
+    instance_count: u32,
 }
 
 impl LinePass {
@@ -38,7 +52,25 @@ impl LinePass {
                 module: &shader,
                 entry_point: "vs_main",
                 compilation_options: Default::default(),
-                buffers: &[LineVertex::LAYOUT],
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        array_stride: size_of::<QuadVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x2,
+                        ],
+                    },
+                    wgpu::VertexBufferLayout {
+                        array_stride: size_of::<LineInstance>() as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![
+                            1 => Float32x3,
+                            2 => Float32x3,
+                            3 => Float32x4,
+                            4 => Float32,
+                        ],
+                    },
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -51,7 +83,8 @@ impl LinePass {
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -69,24 +102,50 @@ impl LinePass {
             cache: None,
         });
 
+        let quad_verts = [
+            QuadVertex { position: [0.0, -0.5] },
+            QuadVertex { position: [1.0, -0.5] },
+            QuadVertex { position: [0.0,  0.5] },
+            QuadVertex { position: [1.0,  0.5] },
+        ];
+        let quad_indices: [u32; 6] = [0, 1, 2, 2, 1, 3];
+
+        let quad_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line-quad-vb"),
+            size: (quad_verts.len() * size_of::<QuadVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&quad_vertex_buffer, 0, bytemuck::cast_slice(&quad_verts));
+
+        let quad_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line-quad-ib"),
+            size: (quad_indices.len() * size_of::<u32>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue.write_buffer(&quad_index_buffer, 0, bytemuck::cast_slice(&quad_indices));
+
         let initial_capacity = 4096;
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("line-vb"),
-            size: (initial_capacity * std::mem::size_of::<LineVertex>()) as u64,
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("line-instance-vb"),
+            size: (initial_capacity * size_of::<LineInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         LinePass {
             pipeline,
-            vertex_buffer,
+            quad_vertex_buffer,
+            quad_index_buffer,
+            instance_buffer,
             capacity: initial_capacity,
-            vertex_count: 0,
+            instance_count: 0,
         }
     }
 
     pub fn prepare(&mut self, gpu: &GpuContext, scene: &SceneGraph) {
-        let mut verts: Vec<LineVertex> = Vec::with_capacity(self.capacity);
+        let mut instances: Vec<LineInstance> = Vec::with_capacity(self.capacity);
 
         for entity in scene.entities.values() {
             if !entity.visible {
@@ -98,37 +157,42 @@ impl LinePass {
                         continue;
                     }
                     let color = p.color.to_array();
+                    let thickness = p.width;
                     for pair in p.points.windows(2) {
                         let a = transform_point(entity.transform, pair[0]);
                         let b = transform_point(entity.transform, pair[1]);
-                        verts.push(LineVertex { position: a.into(), color });
-                        verts.push(LineVertex { position: b.into(), color });
+                        instances.push(LineInstance {
+                            start: a.into(),
+                            end: b.into(),
+                            color,
+                            thickness,
+                        });
                     }
                 }
                 ScenePrimitive::Frame(f) => {
-                    push_frame_axes(&mut verts, entity.transform * f.transform, f.axis_length);
+                    push_frame_axes(&mut instances, entity.transform * f.transform, f.axis_length);
                 }
                 _ => {}
             }
         }
 
-        self.vertex_count = verts.len() as u32;
-        if verts.is_empty() {
+        self.instance_count = instances.len() as u32;
+        if instances.is_empty() {
             return;
         }
 
-        if verts.len() > self.capacity {
-            self.capacity = (verts.len() * 2).next_power_of_two();
-            self.vertex_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("line-vb"),
-                size: (self.capacity * std::mem::size_of::<LineVertex>()) as u64,
+        if instances.len() > self.capacity {
+            self.capacity = (instances.len() * 2).next_power_of_two();
+            self.instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("line-instance-vb"),
+                size: (self.capacity * size_of::<LineInstance>()) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
         }
 
         gpu.queue
-            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
     }
 
     pub fn draw<'a>(
@@ -136,13 +200,15 @@ impl LinePass {
         rpass: &mut wgpu::RenderPass<'a>,
         camera_bg: &'a wgpu::BindGroup,
     ) {
-        if self.vertex_count == 0 {
+        if self.instance_count == 0 {
             return;
         }
         rpass.set_pipeline(&self.pipeline);
         rpass.set_bind_group(0, camera_bg, &[]);
-        rpass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        rpass.draw(0..self.vertex_count, 0..1);
+        rpass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
+        rpass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        rpass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        rpass.draw_indexed(0..6, 0, 0..self.instance_count);
     }
 }
 
@@ -151,7 +217,7 @@ fn transform_point(m: glam::Mat4, p: Vec3) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
 }
 
-fn push_frame_axes(out: &mut Vec<LineVertex>, transform: glam::Mat4, length: f32) {
+fn push_frame_axes(out: &mut Vec<LineInstance>, transform: glam::Mat4, length: f32) {
     let origin = transform_point(transform, Vec3::ZERO);
     let x = transform_point(transform, Vec3::new(length, 0.0, 0.0));
     let y = transform_point(transform, Vec3::new(0.0, length, 0.0));
@@ -161,10 +227,10 @@ fn push_frame_axes(out: &mut Vec<LineVertex>, transform: glam::Mat4, length: f32
     let green = Color::GREEN.to_array();
     let blue = Color::BLUE.to_array();
 
-    out.push(LineVertex { position: origin.into(), color: red });
-    out.push(LineVertex { position: x.into(), color: red });
-    out.push(LineVertex { position: origin.into(), color: green });
-    out.push(LineVertex { position: y.into(), color: green });
-    out.push(LineVertex { position: origin.into(), color: blue });
-    out.push(LineVertex { position: z.into(), color: blue });
+    // Default thickness for frames could be something like 0.01 * length or a fixed value.
+    let thickness = (length * 0.05).clamp(0.005, 0.05);
+
+    out.push(LineInstance { start: origin.into(), end: x.into(), color: red, thickness });
+    out.push(LineInstance { start: origin.into(), end: y.into(), color: green, thickness });
+    out.push(LineInstance { start: origin.into(), end: z.into(), color: blue, thickness });
 }

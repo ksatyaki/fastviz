@@ -91,6 +91,17 @@ pub struct Mesh {
     pub material: Material,
 }
 
+impl Mesh {
+    pub fn geometry_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        bytemuck::cast_slice::<_, u8>(&self.vertices).hash(&mut hasher);
+        bytemuck::cast_slice::<_, u8>(&self.indices).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 /// A screen-space or world-space text label.
 #[derive(Clone, Debug)]
 pub struct Label {

@@ -21,7 +21,7 @@ impl ReferenceGridPass {
         let device = &gpu.device;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("line-shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/line.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/flat_line.wgsl").into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

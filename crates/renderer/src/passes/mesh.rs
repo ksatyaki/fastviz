@@ -20,32 +20,27 @@ struct InstanceUniform {
     color: [f32; 4],
 }
 
-struct GpuMesh {
+struct SharedGeometry {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    
     instance_buffer: wgpu::Buffer,
-    instance_bind_group: wgpu::BindGroup,
-    wireframe: bool,
-    /// `entity.revision` of the geometry currently sitting in the vertex /
-    /// index buffers. Compared against the live entity each frame; if equal,
-    /// we skip the upload entirely (the common case once URDF is loaded).
-    uploaded_revision: u64,
-    /// Last `InstanceUniform` written to `instance_buffer`. Lets us skip the
-    /// 80-byte per-frame `write_buffer` when the transform + color are
-    /// unchanged from last frame.
-    last_instance: InstanceUniform,
-    /// Whether `last_instance` reflects what's actually on the GPU yet.
-    instance_uploaded: bool,
+    instance_capacity: usize,
+    
+    instances: Vec<InstanceUniform>,
 }
 
 pub struct MeshPass {
     fill_pipeline: wgpu::RenderPipeline,
-    instance_bgl: wgpu::BindGroupLayout,
-    meshes: HashMap<EntityId, GpuMesh>,
-    /// Scene revision the `meshes` map was last reconciled against. When the
-    /// revision hasn't moved we skip the whole prepare loop — neither
-    /// geometry uploads nor instance writes nor the membership scan.
+    geometries: HashMap<u64, SharedGeometry>,
+    
+    /// Maps an EntityId to its geometry hash so we know which SharedGeometry to use
+    entity_to_hash: HashMap<EntityId, u64>,
+    /// We also track the revision of the entity when we computed its hash,
+    /// so we can re-hash if the primitive changes.
+    entity_revisions: HashMap<EntityId, u64>,
+
     last_revision: Option<u64>,
 }
 
@@ -57,35 +52,34 @@ impl MeshPass {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/lit.wgsl").into()),
         });
 
-        let instance_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mesh-instance-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh-pl"),
-            bind_group_layouts: &[camera_bgl, &instance_bgl],
+            bind_group_layouts: &[camera_bgl],
             push_constant_ranges: &[],
         });
 
-        let vbuffers = [wgpu::VertexBufferLayout {
-            array_stride: size_of::<Vertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![
-                0 => Float32x3,
-                1 => Float32x3,
-                2 => Float32x2,
-            ],
-        }];
+        let vbuffers = [
+            wgpu::VertexBufferLayout {
+                array_stride: size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3,
+                    1 => Float32x3,
+                    2 => Float32x2,
+                ],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: size_of::<InstanceUniform>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    3 => Float32x4,
+                    4 => Float32x4,
+                    5 => Float32x4,
+                    6 => Float32x4,
+                    7 => Float32x4,
+                ],
+            },
+        ];
 
         let fill_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("mesh-fill-pipeline"),
@@ -131,8 +125,9 @@ impl MeshPass {
 
         MeshPass {
             fill_pipeline,
-            instance_bgl,
-            meshes: HashMap::new(),
+            geometries: HashMap::new(),
+            entity_to_hash: HashMap::new(),
+            entity_revisions: HashMap::new(),
             last_revision: None,
         }
     }
@@ -144,82 +139,92 @@ impl MeshPass {
         }
         self.last_revision = Some(revision);
 
+        for geo in self.geometries.values_mut() {
+            geo.instances.clear();
+        }
+
         let mut seen: HashSet<EntityId> = HashSet::new();
 
         for entity in scene.entities.values() {
             let ScenePrimitive::Mesh(mesh) = &entity.primitive else { continue };
             seen.insert(entity.id);
+            
+            let mut current_hash = *self.entity_to_hash.get(&entity.id).unwrap_or(&0);
+            let last_rev = *self.entity_revisions.get(&entity.id).unwrap_or(&0);
+            
+            if last_rev != entity.revision || !self.geometries.contains_key(&current_hash) {
+                current_hash = mesh.geometry_hash();
+                self.entity_to_hash.insert(entity.id, current_hash);
+                self.entity_revisions.insert(entity.id, entity.revision);
+                
+                if !self.geometries.contains_key(&current_hash) {
+                    let mut geo = create_shared_geometry(gpu, &mesh);
+                    self.geometries.insert(current_hash, geo);
+                }
+            }
+            
+            if !entity.visible {
+                continue;
+            }
+
             let inst = InstanceUniform {
                 model: entity.transform.to_cols_array_2d(),
                 color: mesh.material.base_color.to_array(),
             };
-
-            if !self.meshes.contains_key(&entity.id) {
-                // `create_gpu_mesh` already uploads geometry once; record the
-                // entity's current revision so the prepare loop below doesn't
-                // re-upload immediately afterwards.
-                let mut gm = create_gpu_mesh(gpu, &self.instance_bgl, mesh);
-                gm.uploaded_revision = entity.revision;
-                self.meshes.insert(entity.id, gm);
-            }
-            let gm = self.meshes.get_mut(&entity.id).unwrap();
-
-            // Geometry: re-upload only when the entity's payload has actually
-            // changed since the last frame we saw it. URDF links hit this once
-            // (at insert time) and then never again — joint motion is just
-            // transform updates.
-            if gm.uploaded_revision != entity.revision {
-                upload_mesh_geometry(gpu, gm, mesh);
-                gm.uploaded_revision = entity.revision;
-            }
-
-            // Instance uniform: 80 bytes, but multiplied by many links + draws
-            // per second it still shows up — skip the queue write when nothing
-            // changed.
-            if !gm.instance_uploaded || gm.last_instance != inst {
-                gpu.queue
-                    .write_buffer(&gm.instance_buffer, 0, bytemuck::bytes_of(&inst));
-                gm.last_instance = inst;
-                gm.instance_uploaded = true;
-            }
-            gm.wireframe = mesh.material.wireframe;
+            self.geometries.get_mut(&current_hash).unwrap().instances.push(inst);
         }
 
-        // Drop GPU resources for entities that disappeared.
-        self.meshes.retain(|id, _| seen.contains(id));
+        self.entity_to_hash.retain(|id, _| seen.contains(id));
+        self.entity_revisions.retain(|id, _| seen.contains(id));
+        
+        // Remove unused geometries
+        self.geometries.retain(|_, geo| !geo.instances.is_empty());
+
+        for geo in self.geometries.values_mut() {
+            if geo.instances.is_empty() {
+                continue;
+            }
+            if geo.instances.len() > geo.instance_capacity {
+                geo.instance_capacity = (geo.instances.len() * 2).next_power_of_two();
+                geo.instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("mesh-instance-vb"),
+                    size: (geo.instance_capacity * size_of::<InstanceUniform>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            gpu.queue.write_buffer(&geo.instance_buffer, 0, bytemuck::cast_slice(&geo.instances));
+        }
     }
 
     pub fn draw<'a>(
         &'a self,
         rpass: &mut wgpu::RenderPass<'a>,
         camera_bg: &'a wgpu::BindGroup,
-        scene: &SceneGraph,
+        _scene: &SceneGraph,
     ) {
-        if self.meshes.is_empty() {
+        if self.geometries.is_empty() {
             return;
         }
         rpass.set_pipeline(&self.fill_pipeline);
         rpass.set_bind_group(0, camera_bg, &[]);
-        for (id, gm) in &self.meshes {
-            // Honor visibility from the scene graph.
-            if let Some(e) = scene.entities.get(id) {
-                if !e.visible {
-                    continue;
-                }
+        
+        for geo in self.geometries.values() {
+            if geo.instances.is_empty() {
+                continue;
             }
-            rpass.set_bind_group(1, &gm.instance_bind_group, &[]);
-            rpass.set_vertex_buffer(0, gm.vertex_buffer.slice(..));
-            rpass.set_index_buffer(gm.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.draw_indexed(0..gm.index_count, 0, 0..1);
+            rpass.set_vertex_buffer(0, geo.vertex_buffer.slice(..));
+            rpass.set_vertex_buffer(1, geo.instance_buffer.slice(..));
+            rpass.set_index_buffer(geo.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            rpass.draw_indexed(0..geo.index_count, 0, 0..geo.instances.len() as u32);
         }
     }
 }
 
-fn create_gpu_mesh(
+fn create_shared_geometry(
     gpu: &GpuContext,
-    instance_bgl: &wgpu::BindGroupLayout,
     mesh: &Mesh,
-) -> GpuMesh {
+) -> SharedGeometry {
     let vertex_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("mesh-vb"),
         size: ((mesh.vertices.len().max(1)) * size_of::<Vertex>()) as u64,
@@ -232,56 +237,23 @@ fn create_gpu_mesh(
         usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    gpu.queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&mesh.vertices));
+    gpu.queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
+
+    let instance_capacity = 64usize;
     let instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("mesh-instance-ub"),
-        size: size_of::<InstanceUniform>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        label: Some("mesh-instance-vb"),
+        size: (instance_capacity * size_of::<InstanceUniform>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let instance_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("mesh-instance-bg"),
-        layout: instance_bgl,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: instance_buffer.as_entire_binding(),
-        }],
-    });
 
-    let mut gm = GpuMesh {
+    SharedGeometry {
         vertex_buffer,
         index_buffer,
-        index_count: 0,
+        index_count: mesh.indices.len() as u32,
         instance_buffer,
-        instance_bind_group,
-        wireframe: mesh.material.wireframe,
-        uploaded_revision: 0,
-        last_instance: InstanceUniform::zeroed(),
-        instance_uploaded: false,
-    };
-    upload_mesh_geometry(gpu, &mut gm, mesh);
-    gm
-}
-
-fn upload_mesh_geometry(gpu: &GpuContext, gm: &mut GpuMesh, mesh: &Mesh) {
-    let vbytes = bytemuck::cast_slice(&mesh.vertices);
-    let ibytes = bytemuck::cast_slice(&mesh.indices);
-    if (gm.vertex_buffer.size() as usize) < vbytes.len() {
-        gm.vertex_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh-vb"),
-            size: vbytes.len() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        instance_capacity,
+        instances: Vec::new(),
     }
-    if (gm.index_buffer.size() as usize) < ibytes.len() {
-        gm.index_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh-ib"),
-            size: ibytes.len() as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-    }
-    gpu.queue.write_buffer(&gm.vertex_buffer, 0, vbytes);
-    gpu.queue.write_buffer(&gm.index_buffer, 0, ibytes);
-    gm.index_count = mesh.indices.len() as u32;
 }
