@@ -131,7 +131,8 @@ impl MockInjector {
                 ScenePrimitive::Polyline(Polyline {
                     points: pts,
                     color: Color::rgb(0.30, 0.85, 0.55),
-                    width: 1.0,
+                    // World-space thickness in meters (instanced-quad line pass).
+                    width: 0.03,
                 }),
             )
             .with_label("figure_eight"),

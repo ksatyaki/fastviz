@@ -66,6 +66,13 @@ struct AppContext {
     discoverer: ui::TopicDiscovererState,
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
     save_config: ui::SaveConfigState,
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    publish: ui::PublishState,
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    goal: ui::GoalToolState,
+    /// Transient goal-tool drag state (armed → pressed → dragging).
+    #[cfg(feature = "ros")]
+    goal_drag: Option<GoalDrag>,
     /// Per-entity color/scale text-edit buffers. Lives outside egui memory so
     /// it survives across panel rebuilds without keying on internal egui ids.
     edit_state: ui::EntityEditState,
@@ -99,6 +106,20 @@ struct InputState {
     last_cursor: glam::Vec2,
     left_down: bool,
     right_down: bool,
+}
+
+/// Reserved entity for the goal-pose tool's live preview arrow. Lives only
+/// during a drag; well above every ROS id range so it never collides.
+#[cfg(feature = "ros")]
+const GOAL_PREVIEW_ID: scene::EntityId = scene::EntityId(u64::MAX - 7);
+
+/// Transient state while the goal tool is mid-drag: the ground-plane press
+/// point and the current cursor's ground hit, both in renderer-world space.
+#[cfg(feature = "ros")]
+#[derive(Copy, Clone)]
+struct GoalDrag {
+    start: glam::Vec3,
+    current: glam::Vec3,
 }
 
 impl App {
@@ -321,6 +342,10 @@ impl ApplicationHandler for App {
             reference_frame,
             discoverer,
             save_config: ui::SaveConfigState::default(),
+            publish: ui::PublishState::default(),
+            goal: ui::GoalToolState::default(),
+            #[cfg(feature = "ros")]
+            goal_drag: None,
             edit_state: ui::EntityEditState::default(),
             active_topics,
             input: InputState::default(),
@@ -367,6 +392,17 @@ impl ApplicationHandler for App {
                 let p = glam::Vec2::new(position.x as f32, position.y as f32);
                 ctx.input.last_cursor = ctx.input.cursor;
                 ctx.input.cursor = p;
+                #[cfg(feature = "ros")]
+                if ctx.goal_drag.is_some() {
+                    if let Some(hit) = ctx.cursor_ground_hit() {
+                        if let Some(d) = ctx.goal_drag.as_mut() {
+                            d.current = hit;
+                        }
+                        ctx.update_goal_preview();
+                        ctx.window.request_redraw();
+                    }
+                    return;
+                }
                 if !egui_consumed {
                     let dx = p.x - ctx.input.last_cursor.x;
                     let dy = p.y - ctx.input.last_cursor.y;
@@ -383,6 +419,23 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                #[cfg(feature = "ros")]
+                if button == MouseButton::Left && ctx.goal.armed {
+                    if pressed && !egui_consumed {
+                        if let Some(hit) = ctx.cursor_ground_hit() {
+                            ctx.goal_drag = Some(GoalDrag { start: hit, current: hit });
+                            ctx.update_goal_preview();
+                        }
+                    } else if !pressed && ctx.goal_drag.is_some() {
+                        // Only a press that landed on the ground publishes; a
+                        // missed (horizon) press leaves the tool armed to retry.
+                        ctx.publish_goal();
+                    }
+                    // The goal click must not also orbit the camera.
+                    ctx.input.left_down = false;
+                    ctx.window.request_redraw();
+                    return;
+                }
                 match button {
                     MouseButton::Left => ctx.input.left_down = pressed && !egui_consumed,
                     MouseButton::Right => ctx.input.right_down = pressed && !egui_consumed,
@@ -435,6 +488,95 @@ impl ApplicationHandler for App {
 }
 
 impl AppContext {
+    /// Ground-plane (y = 0) world point under the cursor, or `None` when the
+    /// ray misses the ground (e.g. a horizon pick).
+    #[cfg(feature = "ros")]
+    fn cursor_ground_hit(&self) -> Option<glam::Vec3> {
+        let w = self.renderer.gpu.surface_config.width as f32;
+        let h = self.renderer.gpu.surface_config.height as f32;
+        if w < 1.0 || h < 1.0 {
+            return None;
+        }
+        // winit cursor is y-down in physical pixels; flip to GL-style NDC.
+        let ndc = glam::Vec2::new(
+            2.0 * self.input.cursor.x / w - 1.0,
+            1.0 - 2.0 * self.input.cursor.y / h,
+        );
+        self.renderer.camera.ground_ray_hit(ndc, w / h)
+    }
+
+    /// Upsert the live preview arrow for the current goal drag.
+    #[cfg(feature = "ros")]
+    fn update_goal_preview(&mut self) {
+        let Some(d) = self.goal_drag else {
+            return;
+        };
+        let delta = d.current - d.start;
+        let len = delta.length();
+        let direction = if len > 1e-4 {
+            delta / len
+        } else {
+            glam::Vec3::X
+        };
+        let arrow = scene::Arrow {
+            origin: d.start,
+            direction,
+            length: len.max(0.3),
+            shaft_radius: 0.05,
+            head_radius: 0.12,
+            color: scene::Color::rgb(1.0, 0.85, 0.1),
+        };
+        let entity =
+            scene::SceneEntity::new(GOAL_PREVIEW_ID, scene::ScenePrimitive::Arrows(vec![arrow]))
+                .with_label("goal preview".to_string());
+        self.scene.write().upsert(entity);
+    }
+
+    /// Build a `PoseStamped` from the finished drag, publish it to the goal
+    /// topic, clear the preview, and disarm the tool.
+    #[cfg(feature = "ros")]
+    fn publish_goal(&mut self) {
+        if let Some(d) = self.goal_drag.take() {
+            // World ground point → ROS position: (x, -z, 0).
+            let px = d.start.x as f64;
+            let py = -d.start.z as f64;
+            // Drag direction in world → ROS (dx, -dz); yaw about ROS +Z.
+            let dx = (d.current.x - d.start.x) as f64;
+            let dz = (d.current.z - d.start.z) as f64;
+            let yaw = if dx.abs() < 1e-4 && dz.abs() < 1e-4 {
+                0.0
+            } else {
+                (-dz).atan2(dx)
+            };
+            let qz = (yaw * 0.5).sin();
+            let qw = (yaw * 0.5).cos();
+            let json = serde_json::json!({
+                "header": { "frame_id": self.reference_frame },
+                "pose": {
+                    "position": { "x": px, "y": py, "z": 0.0 },
+                    "orientation": { "x": 0.0, "y": 0.0, "z": qz, "w": qw }
+                }
+            })
+            .to_string();
+            if let Some(n) = self.ros.as_ref() {
+                n.publish(ros_node::PublishRequest {
+                    topic: self.goal.topic.trim().to_string(),
+                    type_name: "geometry_msgs/msg/PoseStamped".to_string(),
+                    json,
+                });
+                log::info!(
+                    "goal published to {} ({}, {}) yaw={:.3}",
+                    self.goal.topic.trim(),
+                    px,
+                    py,
+                    yaw
+                );
+            }
+            self.scene.write().remove(GOAL_PREVIEW_ID);
+        }
+        self.goal.armed = false;
+    }
+
     fn draw(&mut self) {
         if let Some(mock) = self.mock.as_mut() {
             let mut scene = self.scene.write();
@@ -491,6 +633,10 @@ impl AppContext {
         // Live "Add topic" requests the UI collects this frame.
         #[cfg(feature = "ros")]
         let mut add_requests: Vec<(String, ros_node::TopicKind)> = Vec::new();
+        // Topics the user clicked ✕ on, and one-shot publishes, this frame.
+        let mut remove_requests: Vec<String> = Vec::new();
+        #[cfg(feature = "ros")]
+        let mut publish_requests: Vec<ros_node::PublishRequest> = Vec::new();
         let full_output = {
             let window = self.window.clone();
             let scene = self.scene.clone();
@@ -503,8 +649,15 @@ impl AppContext {
             let edit_state = &mut self.edit_state;
             let follow = &mut self.follow_frame;
             let theme_mode = &mut self.theme;
+            let remove_requests = &mut remove_requests;
             #[cfg(feature = "ros")]
             let add_requests = &mut add_requests;
+            #[cfg(feature = "ros")]
+            let publish_state = &mut self.publish;
+            #[cfg(feature = "ros")]
+            let goal_state = &mut self.goal;
+            #[cfg(feature = "ros")]
+            let publish_requests = &mut publish_requests;
             self.egui.run_ui(&window, |egui_ctx| {
                 let before = *theme_mode;
                 let mut scene = scene.write();
@@ -522,10 +675,17 @@ impl AppContext {
                     edit_state,
                     follow,
                     theme_mode,
+                    remove_requests,
                     #[cfg(feature = "ros")]
                     topic_ctx,
                     #[cfg(feature = "ros")]
                     add_requests,
+                    #[cfg(feature = "ros")]
+                    publish_state,
+                    #[cfg(feature = "ros")]
+                    goal_state,
+                    #[cfg(feature = "ros")]
+                    publish_requests,
                 );
                 if *theme_mode != before {
                     theme::apply(egui_ctx, *theme_mode);
@@ -543,6 +703,61 @@ impl AppContext {
                     n.request_add_topic(topic.clone(), *kind);
                     if !self.active_topics.iter().any(|t| t == topic) {
                         self.active_topics.push(topic.clone());
+                    }
+                }
+            }
+        }
+
+        // Forward topic removals: stop the subscriber + purge entities on the
+        // node side, and drop the topic from `active_topics` so it isn't written
+        // to a saved config.
+        #[cfg(feature = "ros")]
+        if !remove_requests.is_empty() {
+            if let Some(n) = self.ros.as_ref() {
+                for topic in &remove_requests {
+                    n.request_remove_topic(topic.clone());
+                }
+            }
+            self.active_topics
+                .retain(|t| !remove_requests.iter().any(|r| r == t));
+        }
+        #[cfg(not(feature = "ros"))]
+        let _ = &remove_requests;
+
+        // Forward one-shot publishes, then drive optional rate publishing.
+        #[cfg(feature = "ros")]
+        if let Some(n) = self.ros.as_ref() {
+            for req in &publish_requests {
+                n.publish(req.clone());
+            }
+            if self.publish.repeat
+                && !self.publish.topic.trim().is_empty()
+                && !self.publish.type_name.trim().is_empty()
+            {
+                let period = std::time::Duration::from_secs_f32(
+                    (1.0 / self.publish.rate_hz.max(0.1)).max(0.0),
+                );
+                let now = std::time::Instant::now();
+                let due = self
+                    .publish
+                    .last_publish
+                    .map(|t| now.duration_since(t) >= period)
+                    .unwrap_or(true);
+                if due {
+                    // Validate JSON each tick; surface parse errors without spamming.
+                    match serde_json::from_str::<serde_json::Value>(&self.publish.json) {
+                        Ok(_) => {
+                            n.publish(ros_node::PublishRequest {
+                                topic: self.publish.topic.trim().to_string(),
+                                type_name: self.publish.type_name.trim().to_string(),
+                                json: self.publish.json.clone(),
+                            });
+                            self.publish.last_publish = Some(now);
+                        }
+                        Err(e) => {
+                            self.publish.status = Some(format!("invalid JSON: {e}"));
+                            self.publish.repeat = false;
+                        }
                     }
                 }
             }

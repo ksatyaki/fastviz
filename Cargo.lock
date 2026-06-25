@@ -161,6 +161,7 @@ dependencies = [
  "renderer",
  "ros_node",
  "scene",
+ "serde_json",
  "wgpu",
  "winit",
 ]
@@ -2556,6 +2557,7 @@ dependencies = [
  "r2r",
  "scene",
  "serde",
+ "serde_json",
  "toml",
  "urdf-rs",
 ]

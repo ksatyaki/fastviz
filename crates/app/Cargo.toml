@@ -8,7 +8,7 @@ publish.workspace = true
 [features]
 default = ["mock", "ros"]
 mock = []
-ros = ["dep:ros_node"]
+ros = ["dep:ros_node", "dep:serde_json"]
 
 [dependencies]
 scene = { path = "../scene" }
@@ -28,6 +28,7 @@ pollster = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true, optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [[bin]]

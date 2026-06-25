@@ -33,6 +33,7 @@ use scene::{
 use crate::config::QosOverride;
 use crate::coords::ROS_TO_WORLD;
 use crate::ids::{marker_topic_base, ROS_ID_MARKER_PER_TOPIC};
+use crate::subscribers::discovery::CancelSet;
 use crate::tf::TfTree;
 use crate::tf_refresh::TfRegistry;
 use crate::urdf::{box_mesh, cylinder_mesh, sphere_mesh};
@@ -158,6 +159,7 @@ pub fn spawn_marker_topic(
     topic: String,
     topic_idx: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     let mut qos = QosProfile::default().keep_last(100);
     if let Some(o) = &qos_override {
@@ -174,6 +176,9 @@ pub fn spawn_marker_topic(
         .spawn_local(async move {
             let mut first = true;
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 if first {
                     log::info!(
                         "{topic}: first marker (ns={} id={} type={} action={})",
@@ -210,6 +215,7 @@ pub fn spawn_marker_array_topic(
     topic: String,
     topic_idx: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     let mut qos = QosProfile::default().keep_last(100);
     if let Some(o) = &qos_override {
@@ -226,6 +232,9 @@ pub fn spawn_marker_array_topic(
         .spawn_local(async move {
             let mut first = true;
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 if first {
                     log::info!("{topic}: first MarkerArray ({} markers)", msg.markers.len());
                     first = false;

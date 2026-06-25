@@ -18,6 +18,7 @@ use scene::{Polyline, SceneEntity, SceneHandle, ScenePrimitive};
 use crate::config::{PathStyle, QosOverride};
 use crate::coords::ROS_TO_WORLD;
 use crate::ids::path_id;
+use crate::subscribers::discovery::CancelSet;
 use crate::tf::TfTree;
 
 pub const MSG_TYPE: &str = "nav_msgs/msg/Path";
@@ -33,6 +34,7 @@ pub fn spawn_topic(
     topic: String,
     topic_idx: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     let mut qos = QosProfile::default().keep_last(10);
     if let Some(o) = &qos_override {
@@ -49,6 +51,9 @@ pub fn spawn_topic(
         .spawn_local(async move {
             let mut first = true;
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 let frame = &msg.header.frame_id;
                 let tf_ref_from_frame = if frame == &reference_frame {
                     Mat4::IDENTITY

@@ -19,6 +19,7 @@ use scene::{Colormap, Grid, GridData, SceneEntity, SceneHandle, ScenePrimitive};
 use crate::config::{QosOverride, RosConfig};
 use crate::coords::{QUAD_SWAP, ROS_TO_WORLD};
 use crate::ids::{costmap_id, ROS_ID_MAP};
+use crate::subscribers::discovery::CancelSet;
 use crate::tf::TfTree;
 
 pub const MSG_TYPE: &str = "nav_msgs/msg/OccupancyGrid";
@@ -30,6 +31,7 @@ pub fn spawn(
     scene: SceneHandle,
     tf: Arc<TfTree>,
     cfg: &RosConfig,
+    cancelled: CancelSet,
 ) -> Result<()> {
     spawn_grid(
         node,
@@ -42,12 +44,14 @@ pub fn spawn(
         Colormap::OccupancyDefault,
         "map",
         cfg.map_qos.get(&cfg.map_topic).cloned(),
+        cancelled,
     )
 }
 
 /// Map subscriber for a runtime-chosen topic (the "Add" dialog). Uses the
 /// opaque occupancy colormap and the singleton `ROS_ID_MAP` entity, so it
 /// replaces whatever map slot was previously empty.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_map_topic(
     node: &mut r2r::Node,
     spawner: &LocalSpawner,
@@ -56,6 +60,7 @@ pub fn spawn_map_topic(
     reference_frame: String,
     topic: String,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     spawn_grid(
         node,
@@ -68,6 +73,7 @@ pub fn spawn_map_topic(
         Colormap::OccupancyDefault,
         "map",
         qos_override,
+        cancelled,
     )
 }
 
@@ -83,6 +89,7 @@ pub fn spawn_costmap_topic(
     topic: String,
     topic_index: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     spawn_grid(
         node,
@@ -95,6 +102,7 @@ pub fn spawn_costmap_topic(
         Colormap::Costmap,
         "costmap",
         qos_override,
+        cancelled,
     )
 }
 
@@ -110,6 +118,7 @@ fn spawn_grid(
     colormap: Colormap,
     label_kind: &'static str,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     // Grid publishers commonly use TRANSIENT_LOCAL (latched) durability, but ad-hoc
     // pubs (and most costmaps) use VOLATILE. BestAvailable matches either.
@@ -134,6 +143,9 @@ fn spawn_grid(
             let mut last_stamp_ns: Option<i64> = None;
             let mut first = true;
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 let stamp_ns = stamp_ns(&msg.header.stamp);
                 if last_stamp_ns == Some(stamp_ns) {
                     continue;

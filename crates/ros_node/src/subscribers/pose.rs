@@ -19,6 +19,7 @@ use scene::{Arrow, SceneEntity, SceneHandle, ScenePrimitive};
 use crate::config::{ArrowStyle, QosOverride};
 use crate::coords::ROS_TO_WORLD;
 use crate::ids::{pose_array_id, pose_id};
+use crate::subscribers::discovery::CancelSet;
 use crate::tf::TfTree;
 
 pub const STAMPED_TYPE: &str = "geometry_msgs/msg/PoseStamped";
@@ -35,6 +36,7 @@ pub fn spawn_pose_stamped_topic(
     topic: String,
     topic_idx: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     let mut qos = QosProfile::default().keep_last(10);
     if let Some(o) = &qos_override {
@@ -51,6 +53,9 @@ pub fn spawn_pose_stamped_topic(
         .spawn_local(async move {
             let mut first = true;
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 let arrow = pose_to_arrow(
                     &msg.pose,
                     &msg.header.frame_id,
@@ -82,6 +87,7 @@ pub fn spawn_pose_array_topic(
     topic: String,
     topic_idx: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     let mut qos = QosProfile::default().keep_last(10);
     if let Some(o) = &qos_override {
@@ -98,6 +104,9 @@ pub fn spawn_pose_array_topic(
         .spawn_local(async move {
             let mut first = true;
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 let arrows: Vec<Arrow> = msg
                     .poses
                     .iter()

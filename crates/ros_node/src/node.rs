@@ -1,6 +1,7 @@
 //! Node lifecycle: spawn a dedicated thread for the r2r executor and shut it
 //! down cleanly when the app exits.
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::thread;
@@ -29,6 +30,19 @@ use crate::urdf::UrdfModel;
 /// the executor thread. Each entry is `(topic, [msg_type, ...])`.
 pub type TopicsSnapshot = Arc<RwLock<Vec<(String, Vec<String>)>>>;
 
+/// A generic, untyped publish request from the UI. The executor lazily creates
+/// (and caches) a `PublisherUntyped` per `(topic, type_name)` and publishes the
+/// parsed JSON value. Both the generic publish pane and the goal-pose tool emit
+/// these.
+#[derive(Clone, Debug)]
+pub struct PublishRequest {
+    pub topic: String,
+    /// Fully-qualified message type, e.g. `"geometry_msgs/msg/PoseStamped"`.
+    pub type_name: String,
+    /// `serde_json` text matching the message schema.
+    pub json: String,
+}
+
 pub struct RosNode {
     handle: Option<thread::JoinHandle<()>>,
     shutdown: Sender<()>,
@@ -42,6 +56,10 @@ pub struct RosNode {
     /// Runtime "Add topic" requests from the UI. The executor drains this each
     /// spin and spawns the matching subscriber (RViz-style live add).
     add_topic: Sender<(String, TopicKind)>,
+    /// Generic untyped publish requests (publish pane + goal-pose tool).
+    publish: Sender<PublishRequest>,
+    /// Permanent topic-removal requests from the UI (purge + stop subscriber).
+    remove_topic: Sender<String>,
 }
 
 impl RosNode {
@@ -55,6 +73,8 @@ impl RosNode {
         let topics: TopicsSnapshot = Arc::new(RwLock::new(Vec::new()));
         let topics_thread = topics.clone();
         let (add_tx, add_rx) = unbounded::<(String, TopicKind)>();
+        let (publish_tx, publish_rx) = unbounded::<PublishRequest>();
+        let (remove_tx, remove_rx) = unbounded::<String>();
         let handle = thread::Builder::new()
             .name("ros2-executor".into())
             .spawn(move || {
@@ -66,6 +86,8 @@ impl RosNode {
                     tf_axis_length_thread,
                     topics_thread,
                     add_rx,
+                    publish_rx,
+                    remove_rx,
                 ) {
                     log::error!("ros2 executor exited with error: {e:#}");
                 }
@@ -78,6 +100,8 @@ impl RosNode {
             tf_axis_length,
             topics,
             add_topic: add_tx,
+            publish: publish_tx,
+            remove_topic: remove_tx,
         })
     }
 
@@ -87,6 +111,22 @@ impl RosNode {
     pub fn request_add_topic(&self, topic: String, kind: TopicKind) {
         if let Err(e) = self.add_topic.send((topic, kind)) {
             log::warn!("add-topic request dropped (executor gone): {e}");
+        }
+    }
+
+    /// Publish a generic untyped message. Non-blocking; the executor picks it up
+    /// on its next spin, lazily creating a publisher for `(topic, type_name)`.
+    pub fn publish(&self, req: PublishRequest) {
+        if let Err(e) = self.publish.send(req) {
+            log::warn!("publish request dropped (executor gone): {e}");
+        }
+    }
+
+    /// Permanently remove `topic` from the view: purge its scene entities, stop
+    /// its subscriber, and free its registry slot. Non-blocking.
+    pub fn request_remove_topic(&self, topic: String) {
+        if let Err(e) = self.remove_topic.send(topic) {
+            log::warn!("remove-topic request dropped (executor gone): {e}");
         }
     }
 
@@ -133,6 +173,8 @@ fn run(
     tf_axis_length: Arc<AtomicU32>,
     topics: TopicsSnapshot,
     add_topic: Receiver<(String, TopicKind)>,
+    publish: Receiver<PublishRequest>,
+    remove_topic: Receiver<String>,
 ) -> Result<()> {
     let ctx = r2r::Context::create().context("r2r::Context::create")?;
     let mut node =
@@ -201,6 +243,10 @@ fn run(
     const DISCOVERY_EVERY_N_TICKS: u32 = 50;
     let mut tick_count: u32 = 0;
 
+    // Lazily-created untyped publishers, keyed by (topic, type_name). Kept for
+    // the life of the executor so repeat/rate publishes reuse the same handle.
+    let mut publishers: HashMap<(String, String), r2r::PublisherUntyped> = HashMap::new();
+
     let mut pool = pool;
     while shutdown.try_recv().is_err() {
         // Block on the rcl wait set for up to 20ms for new work.
@@ -231,6 +277,23 @@ fn run(
             ) {
                 log::warn!("failed to add topic {topic}: {e:#}");
             }
+        }
+
+        // Drain generic publish requests. Lazily create + cache an untyped
+        // publisher per (topic, type); parse the JSON body and publish it.
+        while let Ok(req) = publish.try_recv() {
+            if let Err(e) = handle_publish(&mut node, &mut publishers, &req) {
+                log::warn!("publish to {} ({}) failed: {e:#}", req.topic, req.type_name);
+            }
+        }
+
+        // Drain topic-removal requests: flag the subscriber to stop, purge the
+        // topic's scene entities, and free its registry slot for re-add.
+        while let Ok(topic) = remove_topic.try_recv() {
+            registry.cancel_set().write().insert(topic.clone());
+            purge_topic_entities(&scene, &topic);
+            registry.forget(&topic);
+            log::info!("removed topic: {topic}");
         }
 
         // Late URDF arrival (from the /robot_description-style topic): consume
@@ -297,6 +360,64 @@ fn run(
 
     log::info!("ros2 node shutting down");
     Ok(())
+}
+
+/// Parse `req.json` and publish it through a lazily-created untyped publisher
+/// for `(topic, type)`. The publisher is cached so repeat/rate publishes reuse
+/// the same rcl handle.
+fn handle_publish(
+    node: &mut r2r::Node,
+    publishers: &mut HashMap<(String, String), r2r::PublisherUntyped>,
+    req: &PublishRequest,
+) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_str(&req.json).context("parsing publish JSON body")?;
+    let key = (req.topic.clone(), req.type_name.clone());
+    let publisher = match publishers.entry(key) {
+        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+        std::collections::hash_map::Entry::Vacant(e) => {
+            let p = node
+                .create_publisher_untyped(&req.topic, &req.type_name, QosProfile::default())
+                .with_context(|| {
+                    format!("creating publisher for {} ({})", req.topic, req.type_name)
+                })?;
+            log::info!("created publisher: {} ({})", req.topic, req.type_name);
+            e.insert(p)
+        }
+    };
+    publisher.publish(value).context("rcl publish")?;
+    Ok(())
+}
+
+/// Remove every scene entity belonging to `topic` (its label's first whitespace
+/// token equals `topic`), skipping TF-frame and URDF-link entities, which use
+/// non-topic labels and are identified by id range (mirrors `topic_for_entity`
+/// in the UI). Also drops any per-entity style overrides for the purged ids.
+fn purge_topic_entities(scene: &SceneHandle, topic: &str) {
+    use crate::ids::{TF_FRAME_BASE, TF_FRAME_CAPACITY, URDF_LINK_BASE};
+    let mut sw = scene.write();
+    let to_remove: Vec<scene::EntityId> = sw
+        .entities
+        .iter()
+        .filter(|(id, e)| {
+            let in_tf = id.0 >= TF_FRAME_BASE
+                && id.0 < TF_FRAME_BASE.saturating_add(TF_FRAME_CAPACITY);
+            let in_urdf =
+                id.0 >= URDF_LINK_BASE && id.0 < URDF_LINK_BASE.saturating_add(1_000_000);
+            if in_tf || in_urdf {
+                return false;
+            }
+            e.label
+                .as_deref()
+                .and_then(|l| l.split_whitespace().next())
+                == Some(topic)
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in to_remove {
+        sw.remove(id);
+        sw.style_overrides.remove(&id);
+    }
 }
 
 /// Push a freshly-parsed URDF into the scene graph + register every link with

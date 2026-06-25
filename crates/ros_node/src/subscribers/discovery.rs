@@ -7,11 +7,12 @@
 //!
 //! Subscriber teardown on topic-disappear is **not** implemented in M0.5.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
 use futures::executor::LocalSpawner;
+use parking_lot::RwLock;
 use scene::SceneHandle;
 
 use crate::config::RosConfig;
@@ -22,11 +23,18 @@ use crate::tf_refresh::TfRegistry;
 
 const WILDCARD: &str = "*";
 
+/// Shared set of topics the user has removed from the view. Subscriber tasks
+/// can't be dropped (no join handle), so each cooperatively checks this set at
+/// the top of its message loop and `break`s when its topic is present.
+pub type CancelSet = Arc<RwLock<HashSet<String>>>;
+
 /// Tracks already-spawned per-topic subscribers so we never double-subscribe,
 /// and assigns stable indices for `EntityId` allocation.
 #[derive(Default, Debug)]
 pub struct Registry {
     map_spawned: bool,
+    /// Topic name occupying the singleton map slot, so removal can free it.
+    map_topic: Option<String>,
     costmaps: HashMap<String, usize>,
     poses: HashMap<String, usize>,
     pose_arrays: HashMap<String, usize>,
@@ -42,11 +50,36 @@ pub struct Registry {
     scan_next: usize,
     point_next: usize,
     marker_next: usize,
+    /// Topics the user has removed; shared with every subscriber task.
+    cancelled: CancelSet,
 }
 
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Shared cancel set handed to subscriber tasks.
+    pub fn cancel_set(&self) -> CancelSet {
+        self.cancelled.clone()
+    }
+
+    /// Forget a removed topic so a later "Add" re-spawns it cleanly: drop its
+    /// registry slot from whichever map owns it, and free the singleton map
+    /// slot if this was the map topic.
+    pub fn forget(&mut self, topic: &str) {
+        self.costmaps.remove(topic);
+        self.poses.remove(topic);
+        self.pose_arrays.remove(topic);
+        self.paths.remove(topic);
+        self.scans.remove(topic);
+        self.points.remove(topic);
+        self.markers.remove(topic);
+        self.marker_arrays.remove(topic);
+        if self.map_topic.as_deref() == Some(topic) {
+            self.map_spawned = false;
+            self.map_topic = None;
+        }
     }
 }
 
@@ -68,8 +101,9 @@ pub fn bootstrap(
     if cfg.map_topic == WILDCARD {
         log::warn!("wildcard map topics aren't supported in M0.5; skipping");
     } else {
-        occupancy::spawn(node, spawner, scene.clone(), tf.clone(), cfg)?;
+        occupancy::spawn(node, spawner, scene.clone(), tf.clone(), cfg, reg.cancel_set())?;
         reg.map_spawned = true;
+        reg.map_topic = Some(cfg.map_topic.clone());
     }
 
     for topic in cfg.costmap_topics.iter().filter(|t| t.as_str() != WILDCARD) {
@@ -216,6 +250,9 @@ pub fn spawn_for_kind(
     kind: crate::config_writer::TopicKind,
 ) -> Result<()> {
     use crate::config_writer::TopicKind;
+    // A fresh add for a previously-removed topic must clear its cancel flag so
+    // the new subscriber task isn't immediately torn down on its first message.
+    reg.cancelled.write().remove(topic);
     match kind {
         TopicKind::Map => {
             if reg.map_spawned {
@@ -229,8 +266,10 @@ pub fn spawn_for_kind(
                     cfg.reference_frame.clone(),
                     topic.to_string(),
                     cfg.map_qos.get(topic).cloned(),
+                    reg.cancel_set(),
                 )?;
                 reg.map_spawned = true;
+                reg.map_topic = Some(topic.to_string());
                 log::info!("added map topic at runtime: {topic}");
             }
         }
@@ -287,6 +326,7 @@ fn spawn_costmap(
         topic.to_string(),
         idx,
         cfg.costmap_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.costmaps.insert(topic.to_string(), idx);
     Ok(())
@@ -316,6 +356,7 @@ fn spawn_pose(
         topic.to_string(),
         idx,
         cfg.pose_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.poses.insert(topic.to_string(), idx);
     Ok(())
@@ -345,6 +386,7 @@ fn spawn_pose_array(
         topic.to_string(),
         idx,
         cfg.pose_array_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.pose_arrays.insert(topic.to_string(), idx);
     Ok(())
@@ -374,6 +416,7 @@ fn spawn_path(
         topic.to_string(),
         idx,
         cfg.path_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.paths.insert(topic.to_string(), idx);
     Ok(())
@@ -406,6 +449,7 @@ fn spawn_scan(
         topic.to_string(),
         idx,
         cfg.scan_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.scans.insert(topic.to_string(), idx);
     Ok(())
@@ -440,6 +484,7 @@ fn spawn_pointcloud(
         idx,
         cfg.point_qos.get(topic).cloned(),
         stats.clone(),
+        reg.cancel_set(),
     )?;
     reg.points.insert(topic.to_string(), idx);
     Ok(())
@@ -471,6 +516,7 @@ fn spawn_marker(
         topic.to_string(),
         idx,
         cfg.marker_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.markers.insert(topic.to_string(), idx);
     Ok(())
@@ -502,6 +548,7 @@ fn spawn_marker_array(
         topic.to_string(),
         idx,
         cfg.marker_array_qos.get(topic).cloned(),
+        reg.cancel_set(),
     )?;
     reg.marker_arrays.insert(topic.to_string(), idx);
     Ok(())

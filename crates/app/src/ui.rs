@@ -257,6 +257,82 @@ pub struct SaveConfigState {
     pub status: Option<String>,
 }
 
+/// Persistent state for the "Publish" window — pick a topic + type, edit a JSON
+/// body, publish once or at a fixed rate. Owned by the app so it survives across
+/// frames.
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+pub struct PublishState {
+    pub open: bool,
+    pub topic: String,
+    pub type_name: String,
+    pub json: String,
+    pub rate_hz: f32,
+    /// When true, publish every `1/rate_hz` seconds (driven by the redraw loop).
+    pub repeat: bool,
+    /// One-line status (last publish result / JSON parse error).
+    pub status: Option<String>,
+    /// Wall-clock of the last rate-driven publish; `None` until the first tick.
+    pub last_publish: Option<std::time::Instant>,
+}
+
+impl Default for PublishState {
+    fn default() -> Self {
+        PublishState {
+            open: false,
+            topic: String::new(),
+            type_name: String::new(),
+            json: String::new(),
+            rate_hz: 10.0,
+            repeat: false,
+            status: None,
+            last_publish: None,
+        }
+    }
+}
+
+/// State for the interactive `/goal_pose` tool. When `armed`, the next viewport
+/// left-drag sets a ground-plane pose that's published on release.
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+pub struct GoalToolState {
+    pub topic: String,
+    pub armed: bool,
+}
+
+impl Default for GoalToolState {
+    fn default() -> Self {
+        GoalToolState {
+            topic: "/goal_pose".to_string(),
+            armed: false,
+        }
+    }
+}
+
+/// Built-in JSON starter template for a message type. Returns `"{}"` for types
+/// without a bundled template — the user edits the body by hand. Schema-driven
+/// form generation is intentionally out of scope (see the plan's Open Questions).
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+pub fn template_for(type_name: &str) -> &'static str {
+    match type_name {
+        "geometry_msgs/msg/PoseStamped" => {
+            "{\n  \"header\": { \"frame_id\": \"map\" },\n  \"pose\": {\n    \"position\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 },\n    \"orientation\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0, \"w\": 1.0 }\n  }\n}"
+        }
+        "geometry_msgs/msg/PointStamped" => {
+            "{\n  \"header\": { \"frame_id\": \"map\" },\n  \"point\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 }\n}"
+        }
+        "geometry_msgs/msg/Twist" => {
+            "{\n  \"linear\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 },\n  \"angular\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 }\n}"
+        }
+        "geometry_msgs/msg/TwistStamped" => {
+            "{\n  \"header\": { \"frame_id\": \"base_link\" },\n  \"twist\": {\n    \"linear\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 },\n    \"angular\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 }\n  }\n}"
+        }
+        "std_msgs/msg/String" => "{\n  \"data\": \"\"\n}",
+        "std_msgs/msg/Bool" => "{\n  \"data\": false\n}",
+        "std_msgs/msg/Int32" => "{\n  \"data\": 0\n}",
+        "std_msgs/msg/Float64" => "{\n  \"data\": 0.0\n}",
+        _ => "{}",
+    }
+}
+
 /// Inputs the topic discoverer needs from outside.
 #[cfg(feature = "ros")]
 #[derive(Copy, Clone)]
@@ -275,6 +351,7 @@ pub struct EntityEditState {
     hex: HashMap<EntityId, String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     ctx: &egui::Context,
     scene: &mut SceneGraph,
@@ -289,10 +366,19 @@ pub fn draw(
     edit_state: &mut EntityEditState,
     follow_frame: &mut Option<String>,
     theme_mode: &mut theme::Mode,
+    // `remove_requests`: topics the user clicked ✕ on this frame. Always
+    // collected (the side-panel tree is feature-agnostic); only forwarded to the
+    // ROS node in ROS builds.
+    remove_requests: &mut Vec<String>,
     #[cfg(feature = "ros")] topic_ctx: Option<TopicDiscovererCtx<'_>>,
     // `add_requests`: live "Add topic" requests collected this frame; the app
     // forwards them to the ROS node and appends them to the active-topic set.
     #[cfg(feature = "ros")] add_requests: &mut Vec<(String, ros_node::TopicKind)>,
+    #[cfg(feature = "ros")] publish_state: &mut PublishState,
+    #[cfg(feature = "ros")] goal_state: &mut GoalToolState,
+    // `publish_requests`: one-shot publishes collected this frame (publish pane's
+    // "Publish" button). Rate publishing is driven from `main.rs`.
+    #[cfg(feature = "ros")] publish_requests: &mut Vec<ros_node::PublishRequest>,
 ) {
     // Build the list of TF frames currently in the scene for the follow-frame
     // dropdown. Cheap — there are typically tens of frames.
@@ -368,6 +454,35 @@ pub fn draw(
                         .clicked()
                     {
                         save_state.open = !save_state.open;
+                    }
+                    if ui
+                        .button("Publish…")
+                        .on_hover_text("Publish a JSON message to a ROS topic")
+                        .clicked()
+                    {
+                        publish_state.open = !publish_state.open;
+                    }
+                    ui.separator();
+                    ui.label("Goal");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut goal_state.topic)
+                            .desired_width(110.0)
+                            .hint_text("/goal_pose"),
+                    )
+                    .on_hover_text("Topic the goal-pose tool publishes to");
+                    let btn = egui::Button::new("Set Goal").fill(if goal_state.armed {
+                        theme::accent()
+                    } else {
+                        ui.visuals().widgets.inactive.bg_fill
+                    });
+                    if ui
+                        .add(btn)
+                        .on_hover_text(
+                            "Click, then click-drag on the ground to set position + heading",
+                        )
+                        .clicked()
+                    {
+                        goal_state.armed = !goal_state.armed;
                     }
                 }
                 #[cfg(not(feature = "ros"))]
@@ -464,6 +579,7 @@ pub fn draw(
                         &members,
                         edit_state,
                         if show_tf_scale { Some(tf_axis_length) } else { None },
+                        remove_requests,
                     );
                 }
 
@@ -485,7 +601,15 @@ pub fn draw(
                         tf: false,
                         open: false,
                     };
-                    draw_group(ui, scene, &mut synth, &ungrouped, edit_state, None);
+                    draw_group(
+                        ui,
+                        scene,
+                        &mut synth,
+                        &ungrouped,
+                        edit_state,
+                        None,
+                        remove_requests,
+                    );
                 }
             });
         });
@@ -494,6 +618,7 @@ pub fn draw(
     if let Some(tctx) = topic_ctx {
         draw_add_topics(ctx, discoverer, tctx, add_requests);
         draw_save_config(ctx, save_state, tctx, scene, groups, *tf_axis_length, camera);
+        draw_publish(ctx, publish_state, tctx, publish_requests);
     }
 }
 
@@ -766,6 +891,126 @@ fn save_config_file(name: &str, toml: &str, topic_count: usize) -> String {
     }
 }
 
+/// "Publish" window — pick a topic + type (or type them manually), edit a JSON
+/// body, and publish once or at a fixed rate. JSON is validated locally so the
+/// status line can report parse errors before anything hits the wire.
+#[cfg(feature = "ros")]
+fn draw_publish(
+    ctx: &egui::Context,
+    state: &mut PublishState,
+    tctx: TopicDiscovererCtx<'_>,
+    publish_requests: &mut Vec<ros_node::PublishRequest>,
+) {
+    let mut open = state.open;
+    egui::Window::new("Publish")
+        .resizable(true)
+        .default_width(440.0)
+        .default_height(420.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let snapshot: Vec<(String, Vec<String>)> = tctx.topics.read().clone();
+
+            ui.horizontal(|ui| {
+                ui.label("Topic on graph:");
+                egui::ComboBox::from_id_salt("publish_topic_combo")
+                    .selected_text(if state.topic.is_empty() {
+                        "—".to_string()
+                    } else {
+                        state.topic.clone()
+                    })
+                    .width(260.0)
+                    .show_ui(ui, |ui| {
+                        for (topic, types) in &snapshot {
+                            let ty = types.first().cloned().unwrap_or_default();
+                            if ui
+                                .selectable_label(
+                                    state.topic == *topic,
+                                    format!("{topic}  ·  {ty}"),
+                                )
+                                .clicked()
+                            {
+                                state.topic = topic.clone();
+                                state.type_name = ty.clone();
+                                // Only seed the body when it's empty so we don't
+                                // clobber a hand-edited message on re-select.
+                                if state.json.trim().is_empty() {
+                                    state.json = template_for(&ty).to_string();
+                                }
+                            }
+                        }
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Topic");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.topic)
+                        .desired_width(260.0)
+                        .hint_text("/cmd_vel"),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Type ");
+                ui.add(
+                    egui::TextEdit::singleline(&mut state.type_name)
+                        .desired_width(260.0)
+                        .hint_text("geometry_msgs/msg/Twist"),
+                );
+                if ui
+                    .small_button("template")
+                    .on_hover_text("Reset the body to the built-in template for this type")
+                    .clicked()
+                {
+                    state.json = template_for(&state.type_name).to_string();
+                }
+            });
+            ui.separator();
+            ui.label("Message (JSON):");
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut state.json)
+                            .code_editor()
+                            .desired_rows(8)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                let can_publish = !state.topic.trim().is_empty()
+                    && !state.type_name.trim().is_empty();
+                if ui
+                    .add_enabled(can_publish, egui::Button::new("Publish"))
+                    .clicked()
+                {
+                    match serde_json::from_str::<serde_json::Value>(&state.json) {
+                        Ok(_) => {
+                            publish_requests.push(ros_node::PublishRequest {
+                                topic: state.topic.trim().to_string(),
+                                type_name: state.type_name.trim().to_string(),
+                                json: state.json.clone(),
+                            });
+                            state.status = Some(format!("published to {}", state.topic.trim()));
+                        }
+                        Err(e) => state.status = Some(format!("invalid JSON: {e}")),
+                    }
+                }
+                ui.checkbox(&mut state.repeat, "Publish @");
+                ui.add(
+                    egui::DragValue::new(&mut state.rate_hz)
+                        .speed(0.5)
+                        .range(0.1..=1000.0)
+                        .suffix(" Hz"),
+                );
+            });
+            if let Some(msg) = &state.status {
+                ui.separator();
+                ui.label(msg);
+            }
+        });
+    state.open = open;
+}
+
 /// Build the lightweight `UiGroupSave` list the config writer wants from the
 /// in-memory UI groups. Decoupled so the writer crate doesn't depend on egui.
 #[cfg(feature = "ros")]
@@ -782,6 +1027,7 @@ fn groups_for_save(groups: &[UiGroupView]) -> Vec<ros_node::UiGroupSave> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_group(
     ui: &mut egui::Ui,
     scene: &mut SceneGraph,
@@ -789,6 +1035,7 @@ fn draw_group(
     members: &[EntityId],
     edit_state: &mut EntityEditState,
     tf_axis_length: Option<&mut f32>,
+    remove_requests: &mut Vec<String>,
 ) {
     ui.horizontal(|ui| {
         eye_toggle(ui, scene, members, ("group_eye", group.name.as_str()));
@@ -838,7 +1085,7 @@ fn draw_group(
                     }
                 }
                 for (topic, ids) in &by_topic {
-                    draw_topic_bucket(ui, scene, topic, ids, edit_state);
+                    draw_topic_bucket(ui, scene, topic, ids, edit_state, remove_requests);
                 }
                 for id in &topicless {
                     draw_entity_leaf(ui, scene, *id, edit_state);
@@ -856,9 +1103,19 @@ fn draw_topic_bucket(
     topic: &str,
     ids: &[EntityId],
     edit_state: &mut EntityEditState,
+    remove_requests: &mut Vec<String>,
 ) {
     ui.horizontal(|ui| {
         eye_toggle(ui, scene, ids, ("topic_eye", topic));
+        // Permanent removal — only meaningful with a live ROS node behind it.
+        if cfg!(feature = "ros")
+            && ui
+                .small_button("\u{2715}")
+                .on_hover_text("Remove this topic from the view (stops its subscription)")
+                .clicked()
+        {
+            remove_requests.push(topic.to_string());
+        }
         egui::CollapsingHeader::new(format!("{topic}  ({})", ids.len()))
             .id_salt(("topic", topic))
             .default_open(false)
@@ -932,7 +1189,7 @@ fn draw_entity_leaf(
     id: EntityId,
     edit_state: &mut EntityEditState,
 ) {
-    let (display, kind, current_color, current_scale, is_frame) =
+    let (display, kind, current_color, current_scale, is_frame, prim_kind, current_head) =
         match scene.entities.get(&id) {
             Some(e) => (
                 e.label
@@ -942,6 +1199,8 @@ fn draw_entity_leaf(
                 scene::primitive_color(&e.primitive),
                 scene::primitive_scale(&e.primitive),
                 matches!(e.primitive, ScenePrimitive::Frame(_)),
+                StyleEditKind::of(&e.primitive),
+                scene::primitive_head_radius(&e.primitive),
             ),
             None => return,
         };
@@ -959,6 +1218,8 @@ fn draw_entity_leaf(
                     current_color,
                     current_scale,
                     is_frame,
+                    prim_kind,
+                    current_head,
                     edit_state,
                 );
             });
@@ -966,6 +1227,27 @@ fn draw_entity_leaf(
     });
 }
 
+/// Which per-entity scale control to present in the style editor. Most
+/// primitives just get a generic "scale"; Polylines get a world-space
+/// "thickness" and Arrows additionally get an independent "head size".
+#[derive(Copy, Clone, PartialEq)]
+enum StyleEditKind {
+    Generic,
+    Polyline,
+    Arrows,
+}
+
+impl StyleEditKind {
+    fn of(p: &ScenePrimitive) -> Self {
+        match p {
+            ScenePrimitive::Polyline(_) => StyleEditKind::Polyline,
+            ScenePrimitive::Arrows(_) => StyleEditKind::Arrows,
+            _ => StyleEditKind::Generic,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_entity_style_editor(
     ui: &mut egui::Ui,
     scene: &mut SceneGraph,
@@ -973,6 +1255,8 @@ fn draw_entity_style_editor(
     current_color: Option<scene::Color>,
     current_scale: Option<f32>,
     is_frame: bool,
+    prim_kind: StyleEditKind,
+    current_head: Option<f32>,
     edit_state: &mut EntityEditState,
 ) {
     if let Some(c) = current_color {
@@ -1013,20 +1297,62 @@ fn draw_entity_style_editor(
         // Frame primitives use the global TF size slider in the group header;
         // a per-entity scale editor here would just fight that update loop.
         if !is_frame {
+            let (label, hover) = match prim_kind {
+                // Polyline.width renders as a world-space line thickness now
+                // (instanced quads), so present it in meters.
+                StyleEditKind::Polyline => (
+                    "thickness (m)",
+                    "World-space line thickness in meters.",
+                ),
+                StyleEditKind::Arrows => (
+                    "length (m)",
+                    "Arrow length in meters (shaft + head scale proportionally).",
+                ),
+                StyleEditKind::Generic => ("scale", "Per-entity size override."),
+            };
             let mut val = s;
             ui.horizontal(|ui| {
-                ui.label("scale");
+                ui.label(label);
                 let resp = ui.add(
                     egui::DragValue::new(&mut val)
                         .speed(0.01)
                         .range(0.001..=100.0)
                         .max_decimals(3),
-                );
+                )
+                .on_hover_text(hover);
                 if resp.changed() {
                     scene.set_scale_override(id, Some(val));
                 }
                 if ui.small_button("reset").on_hover_text("Drop scale override").clicked() {
                     scene.set_scale_override(id, None);
+                }
+            });
+        }
+    }
+
+    // Arrows get an independent head-size control (absolute world radius),
+    // separate from the proportional length scale above.
+    if prim_kind == StyleEditKind::Arrows {
+        if let Some(h) = current_head {
+            let mut val = h;
+            ui.horizontal(|ui| {
+                ui.label("head size (m)");
+                let resp = ui.add(
+                    egui::DragValue::new(&mut val)
+                        .speed(0.005)
+                        .range(0.001..=10.0)
+                        .max_decimals(3),
+                )
+                .on_hover_text("Arrow head radius in meters, independent of length.");
+                if resp.changed() {
+                    scene.set_head_scale_override(id, Some(val));
+                }
+                if ui
+                    .small_button("reset")
+                    .on_hover_text("Drop head-size override")
+                    .clicked()
+                {
+                    scene.set_head_scale_override(id, None);
                 }
             });
         }

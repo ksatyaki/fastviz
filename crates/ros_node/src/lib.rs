@@ -23,5 +23,5 @@ pub use config_writer::{
     UiGroupSave,
 };
 pub use ids::{ROS_ID_MARKER_BASE, TF_FRAME_BASE, TF_FRAME_CAPACITY, URDF_LINK_BASE};
-pub use node::{RosNode, TopicsSnapshot};
+pub use node::{PublishRequest, RosNode, TopicsSnapshot};
 pub use stats::RosStats;

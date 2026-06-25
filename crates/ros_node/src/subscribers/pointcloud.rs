@@ -24,6 +24,7 @@ use crate::config::{PointCloudStyle, QosOverride};
 use crate::coords::ROS_TO_WORLD;
 use crate::ids::pointcloud_id;
 use crate::stats::RosStats;
+use crate::subscribers::discovery::CancelSet;
 use crate::tf::TfTree;
 use crate::tf_refresh::TfRegistry;
 
@@ -83,6 +84,7 @@ pub fn spawn_topic(
     topic_idx: usize,
     qos_override: Option<QosOverride>,
     stats: Arc<RosStats>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     // sensor_data: best_effort, depth 5 — matches typical lidar/depth publishers.
     let mut qos = QosProfile::sensor_data();
@@ -105,6 +107,9 @@ pub fn spawn_topic(
             let mut warned_missing_tf = false;
             let mut points: Vec<Point> = Vec::new();
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 if msg.is_bigendian {
                     log::warn!("{topic}: big-endian PointCloud2 not supported, dropping");
                     continue;

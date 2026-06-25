@@ -98,10 +98,68 @@ impl OrbitCamera {
         self.pitch = 0.0;
     }
 
+    /// Unproject a normalized-device-coordinate point and intersect the camera
+    /// ray with the ground plane `y = 0`. `ndc` uses the GL convention: x and y
+    /// in `[-1, 1]` with **+y up** (callers must flip winit's y-down cursor).
+    /// Returns `None` when the ray is parallel to the ground or points away
+    /// from it (e.g. a horizon/sky pick).
+    pub fn ground_ray_hit(&self, ndc: glam::Vec2, aspect: f32) -> Option<Vec3> {
+        let inv = self.view_proj(aspect).inverse();
+        let unproject = |z: f32| -> Vec3 {
+            let p = inv * glam::Vec4::new(ndc.x, ndc.y, z, 1.0);
+            p.truncate() / p.w
+        };
+        // glam's perspective_rh maps near→0, far→1 (wgpu depth convention).
+        let near = unproject(0.0);
+        let far = unproject(1.0);
+        let dir = (far - near).normalize_or_zero();
+        if dir.y.abs() < 1e-6 {
+            return None; // parallel to the ground plane
+        }
+        let t = -near.y / dir.y;
+        if t < 0.0 {
+            return None; // intersection is behind the camera
+        }
+        Some(near + dir * t)
+    }
+
     /// Transform-only orientation; useful for a few passes that want to face
     /// the camera (e.g. screen-aligned arrows).
     pub fn rotation(&self) -> Quat {
         Quat::from_euler(glam::EulerRot::YXZ, self.yaw, self.pitch, 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use glam::Vec2;
+
+    #[test]
+    fn center_ray_hits_target_on_ground() {
+        // Default camera targets the origin, which lies on y = 0; the screen
+        // center ray must hit there.
+        let cam = OrbitCamera::default();
+        let hit = cam.ground_ray_hit(Vec2::ZERO, 16.0 / 9.0).expect("center hit");
+        assert!(hit.distance(Vec3::ZERO) < 1e-3, "hit = {hit:?}");
+    }
+
+    #[test]
+    fn top_down_center_hits_below_camera() {
+        let mut cam = OrbitCamera::default();
+        cam.target = Vec3::new(2.0, 0.0, -3.0);
+        cam.top_down();
+        let hit = cam.ground_ray_hit(Vec2::ZERO, 1.0).expect("center hit");
+        assert!(hit.distance(cam.target) < 1e-2, "hit = {hit:?}");
+    }
+
+    #[test]
+    fn horizon_ray_misses() {
+        // Side-on camera (pitch ≈ 0): the top of the screen looks toward the
+        // sky and should not intersect the ground.
+        let mut cam = OrbitCamera::default();
+        cam.side();
+        assert!(cam.ground_ray_hit(Vec2::new(0.0, 1.0), 1.0).is_none());
     }
 }
 

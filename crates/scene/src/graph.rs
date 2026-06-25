@@ -76,6 +76,16 @@ impl SceneEntity {
 pub struct StyleOverride {
     pub color: Option<Color>,
     pub scale: Option<f32>,
+    /// Arrow head radius (world-space, absolute) — independent of `scale`,
+    /// which scales the whole arrow proportionally. Only affects Arrows.
+    pub head_scale: Option<f32>,
+}
+
+impl StyleOverride {
+    /// True when nothing is overridden — used to drop the map entry entirely.
+    fn is_empty(&self) -> bool {
+        self.color.is_none() && self.scale.is_none() && self.head_scale.is_none()
+    }
 }
 
 #[derive(Debug)]
@@ -149,7 +159,7 @@ impl SceneGraph {
     pub fn set_color_override(&mut self, id: EntityId, color: Option<Color>) {
         let ov = self.style_overrides.entry(id).or_default();
         ov.color = color;
-        if ov.color.is_none() && ov.scale.is_none() {
+        if ov.is_empty() {
             self.style_overrides.remove(&id);
         }
         if let Some(e) = self.entities.get_mut(&id) {
@@ -168,12 +178,31 @@ impl SceneGraph {
     pub fn set_scale_override(&mut self, id: EntityId, scale: Option<f32>) {
         let ov = self.style_overrides.entry(id).or_default();
         ov.scale = scale;
-        if ov.color.is_none() && ov.scale.is_none() {
+        if ov.is_empty() {
             self.style_overrides.remove(&id);
         }
         if let Some(e) = self.entities.get_mut(&id) {
             if let Some(s) = scale {
                 apply_scale(&mut e.primitive, s);
+            }
+            e.dirty = true;
+            e.revision = e.revision.wrapping_add(1);
+        }
+        self.revision += 1;
+    }
+
+    /// Set (or clear) the per-entity arrow head-size override. Absolute
+    /// world-space head radius, independent of the proportional `scale`
+    /// override. No-op for non-Arrow primitives.
+    pub fn set_head_scale_override(&mut self, id: EntityId, head_scale: Option<f32>) {
+        let ov = self.style_overrides.entry(id).or_default();
+        ov.head_scale = head_scale;
+        if ov.is_empty() {
+            self.style_overrides.remove(&id);
+        }
+        if let Some(e) = self.entities.get_mut(&id) {
+            if let Some(h) = head_scale {
+                apply_head_scale(&mut e.primitive, h);
             }
             e.dirty = true;
             e.revision = e.revision.wrapping_add(1);
@@ -222,6 +251,27 @@ fn apply_override(p: &mut ScenePrimitive, ov: StyleOverride) {
     }
     if let Some(s) = ov.scale {
         apply_scale(p, s);
+    }
+    if let Some(h) = ov.head_scale {
+        apply_head_scale(p, h);
+    }
+}
+
+/// Apply an absolute arrow head radius. No-op for non-Arrow primitives.
+pub fn apply_head_scale(p: &mut ScenePrimitive, head_radius: f32) {
+    let head_radius = head_radius.max(1e-4);
+    if let ScenePrimitive::Arrows(arrs) = p {
+        for a in arrs.iter_mut() {
+            a.head_radius = head_radius;
+        }
+    }
+}
+
+/// Read the arrow head radius from a primitive, if it is an Arrows primitive.
+pub fn primitive_head_radius(p: &ScenePrimitive) -> Option<f32> {
+    match p {
+        ScenePrimitive::Arrows(arrs) => arrs.first().map(|a| a.head_radius),
+        _ => None,
     }
 }
 
@@ -482,6 +532,39 @@ mod tests {
             ScenePrimitive::Polyline(p) => assert!((p.width - 5.0).abs() < 1e-6),
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn head_scale_override_survives_republish() {
+        use crate::primitives::Arrow;
+        let mut g = SceneGraph::default();
+        let arrow = || Arrow {
+            origin: Vec3::ZERO,
+            direction: Vec3::X,
+            length: 1.0,
+            shaft_radius: 0.05,
+            head_radius: 0.1,
+            color: Color::RED,
+        };
+        g.upsert(SceneEntity::new(
+            EntityId(60),
+            ScenePrimitive::Arrows(vec![arrow()]),
+        ));
+        g.set_head_scale_override(EntityId(60), Some(0.5));
+        // Subscriber pushes a fresh primitive with the old head radius.
+        g.upsert(SceneEntity::new(
+            EntityId(60),
+            ScenePrimitive::Arrows(vec![arrow()]),
+        ));
+        match &g.entities[&EntityId(60)].primitive {
+            ScenePrimitive::Arrows(a) => {
+                assert!((a[0].head_radius - 0.5).abs() < 1e-6, "head_radius={}", a[0].head_radius)
+            }
+            _ => unreachable!(),
+        }
+        // Clearing it drops the map entry.
+        g.set_head_scale_override(EntityId(60), None);
+        assert!(!g.style_overrides.contains_key(&EntityId(60)));
     }
 
     #[test]

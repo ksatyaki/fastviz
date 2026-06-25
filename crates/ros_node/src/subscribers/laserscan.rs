@@ -20,6 +20,7 @@ use scene::{Point, SceneEntity, SceneHandle, ScenePrimitive};
 use crate::config::{QosOverride, ScanStyle};
 use crate::coords::ROS_TO_WORLD;
 use crate::ids::scan_id;
+use crate::subscribers::discovery::CancelSet;
 use crate::tf::TfTree;
 use crate::tf_refresh::TfRegistry;
 
@@ -37,6 +38,7 @@ pub fn spawn_topic(
     topic: String,
     topic_idx: usize,
     qos_override: Option<QosOverride>,
+    cancelled: CancelSet,
 ) -> Result<()> {
     // sensor_data QoS: best_effort, depth 5 — matches typical laser drivers.
     let mut qos = QosProfile::sensor_data();
@@ -58,6 +60,9 @@ pub fn spawn_topic(
             let mut warned_missing_tf = false;
             let mut points: Vec<Point> = Vec::new();
             while let Some(msg) = sub.next().await {
+                if cancelled.read().contains(&topic) {
+                    break;
+                }
                 points.clear();
                 if points.capacity() < msg.ranges.len() {
                     points.reserve(msg.ranges.len() - points.capacity());

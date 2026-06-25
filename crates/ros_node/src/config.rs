@@ -204,7 +204,10 @@ pub struct PathStyle {
 impl Default for PathStyle {
     fn default() -> Self {
         PathStyle {
-            width: 2.0,
+            // World-space thickness in meters: the line pass renders Polylines
+            // as instanced quads extruded by `width`, so this is a physical
+            // width (RViz-style ~few cm), not the old pixel-ish value.
+            width: 0.05,
             color: scene::Color::rgb(0.20, 0.85, 0.30),
         }
     }
