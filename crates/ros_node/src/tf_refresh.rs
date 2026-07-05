@@ -69,17 +69,26 @@ impl TfRegistry {
         local: Mat4,
         stamp_ns: Option<i64>,
     ) {
-        self.entries.lock().insert(
+        let frame = frame.into();
+        let mut entries = self.entries.lock();
+        // High-rate subscribers (scans, clouds) call this on every message,
+        // so only treat it as a "fresh" registration — and let the warning
+        // fire again — when the frame id actually changed. Otherwise a
+        // persistently-missing frame would clear `warned` every tick and
+        // spam the log (and tank fps) for as long as messages keep arriving.
+        let frame_changed = entries.get(&id).is_none_or(|e| e.frame != frame);
+        entries.insert(
             id,
             Entry {
-                frame: frame.into(),
+                frame,
                 local,
                 stamp_ns,
             },
         );
-        // Fresh registration may resolve a previously-broken lookup; let the
-        // warning fire again if it doesn't.
-        self.warned.lock().remove(&id);
+        drop(entries);
+        if frame_changed {
+            self.warned.lock().remove(&id);
+        }
     }
 
     /// Forget an entity (e.g., when its publisher disappears). Idempotent.

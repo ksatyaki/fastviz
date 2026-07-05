@@ -257,6 +257,19 @@ pub struct SaveConfigState {
     pub status: Option<String>,
 }
 
+/// Persistent state for the "Load config" window. Owned by the app so the
+/// typed path and last status survive across frames.
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+#[derive(Default)]
+pub struct LoadConfigState {
+    pub open: bool,
+    /// Path the user typed (relative paths resolve against the CWD).
+    pub path: String,
+    /// One-line status (result of the last load attempt), set by `main.rs`
+    /// after it actually applies the config.
+    pub status: Option<String>,
+}
+
 /// Persistent state for the "Publish" window — pick a topic + type, edit a JSON
 /// body, publish once or at a fixed rate. Owned by the app so it survives across
 /// frames.
@@ -307,6 +320,25 @@ impl Default for GoalToolState {
     }
 }
 
+/// State for the interactive pose-estimate tool (`/initialpose`). When
+/// `armed`, the next viewport left-drag sets a ground-plane pose that's
+/// published as a `PoseWithCovarianceStamped` on release — the message type
+/// both AMCL and slam_toolbox subscribe to for initial-pose seeding.
+#[cfg_attr(not(feature = "ros"), allow(dead_code))]
+pub struct PoseEstimateToolState {
+    pub topic: String,
+    pub armed: bool,
+}
+
+impl Default for PoseEstimateToolState {
+    fn default() -> Self {
+        PoseEstimateToolState {
+            topic: "/initialpose".to_string(),
+            armed: false,
+        }
+    }
+}
+
 /// Built-in JSON starter template for a message type. Returns `"{}"` for types
 /// without a bundled template — the user edits the body by hand. Schema-driven
 /// form generation is intentionally out of scope (see the plan's Open Questions).
@@ -315,6 +347,9 @@ pub fn template_for(type_name: &str) -> &'static str {
     match type_name {
         "geometry_msgs/msg/PoseStamped" => {
             "{\n  \"header\": { \"frame_id\": \"map\" },\n  \"pose\": {\n    \"position\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 },\n    \"orientation\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0, \"w\": 1.0 }\n  }\n}"
+        }
+        "geometry_msgs/msg/PoseWithCovarianceStamped" => {
+            "{\n  \"header\": { \"frame_id\": \"map\" },\n  \"pose\": {\n    \"pose\": {\n      \"position\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 },\n      \"orientation\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0, \"w\": 1.0 }\n    },\n    \"covariance\": [0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0, 0.0,0.0,0.0,0.0,0.0,0.0]\n  }\n}"
         }
         "geometry_msgs/msg/PointStamped" => {
             "{\n  \"header\": { \"frame_id\": \"map\" },\n  \"point\": { \"x\": 0.0, \"y\": 0.0, \"z\": 0.0 }\n}"
@@ -351,6 +386,29 @@ pub struct EntityEditState {
     hex: HashMap<EntityId, String>,
 }
 
+/// Single-selection model for the entities panel. UI-only — never persisted
+/// to config.
+#[derive(Default)]
+pub struct SelectionState {
+    pub selected: Option<EntityId>,
+}
+
+/// Floating "Edit style" popup: which entity it's editing and whether it's
+/// currently open. Opened via the row context menu or the pinned Edit button.
+#[derive(Default)]
+pub struct EditPopupState {
+    pub open: bool,
+    pub target: Option<EntityId>,
+}
+
+/// Whether an entity can be edited via the style popup: it must expose a
+/// color or scale control. `Frame` uses the global TF-size control instead of
+/// a per-entity one, and `Grid(Cells)` has no single color/scale.
+fn is_editable(p: &ScenePrimitive) -> bool {
+    scene::primitive_color(p).is_some()
+        || (scene::primitive_scale(p).is_some() && !matches!(p, ScenePrimitive::Frame(_)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     ctx: &egui::Context,
@@ -363,7 +421,10 @@ pub fn draw(
     tf_axis_length: &mut f32,
     discoverer: &mut TopicDiscovererState,
     save_state: &mut SaveConfigState,
+    load_state: &mut LoadConfigState,
     edit_state: &mut EntityEditState,
+    selection: &mut SelectionState,
+    edit_popup: &mut EditPopupState,
     follow_frame: &mut Option<String>,
     theme_mode: &mut theme::Mode,
     // `remove_requests`: topics the user clicked ✕ on this frame. Always
@@ -376,9 +437,11 @@ pub fn draw(
     #[cfg(feature = "ros")] add_requests: &mut Vec<(String, ros_node::TopicKind)>,
     #[cfg(feature = "ros")] publish_state: &mut PublishState,
     #[cfg(feature = "ros")] goal_state: &mut GoalToolState,
+    #[cfg(feature = "ros")] pose_estimate_state: &mut PoseEstimateToolState,
     // `publish_requests`: one-shot publishes collected this frame (publish pane's
     // "Publish" button). Rate publishing is driven from `main.rs`.
     #[cfg(feature = "ros")] publish_requests: &mut Vec<ros_node::PublishRequest>,
+    #[cfg(feature = "ros")] load_request: &mut Option<std::path::PathBuf>,
 ) {
     // Build the list of TF frames currently in the scene for the follow-frame
     // dropdown. Cheap — there are typically tens of frames.
@@ -406,8 +469,75 @@ pub fn draw(
                         .font(FontId::new(18.0, FontFamily::Proportional))
                         .color(theme::accent()),
                 );
-                ui.add_space(6.0);
-                ui.separator();
+                #[cfg(feature = "ros")]
+                {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    if ui
+                        .button("Publish…")
+                        .on_hover_text("Publish a JSON message to a ROS topic")
+                        .clicked()
+                    {
+                        publish_state.open = !publish_state.open;
+                    }
+                    ui.separator();
+                    ui.label("Goal");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut goal_state.topic)
+                            .desired_width(110.0)
+                            .hint_text("/goal_pose"),
+                    )
+                    .on_hover_text("Topic the goal-pose tool publishes to");
+                    let btn = egui::Button::new("Set Goal").fill(if goal_state.armed {
+                        theme::accent()
+                    } else {
+                        ui.visuals().widgets.inactive.bg_fill
+                    });
+                    if ui
+                        .add(btn)
+                        .on_hover_text(
+                            "Click, then click-drag on the ground to set position + heading",
+                        )
+                        .clicked()
+                    {
+                        goal_state.armed = !goal_state.armed;
+                        if goal_state.armed {
+                            pose_estimate_state.armed = false;
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Pose Est.");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut pose_estimate_state.topic)
+                            .desired_width(110.0)
+                            .hint_text("/initialpose"),
+                    )
+                    .on_hover_text("Topic the pose-estimate tool publishes to");
+                    let btn = egui::Button::new("Set Pose").fill(if pose_estimate_state.armed {
+                        theme::accent()
+                    } else {
+                        ui.visuals().widgets.inactive.bg_fill
+                    });
+                    if ui
+                        .add(btn)
+                        .on_hover_text(
+                            "Click, then click-drag on the ground to set the localization pose estimate",
+                        )
+                        .clicked()
+                    {
+                        pose_estimate_state.armed = !pose_estimate_state.armed;
+                        if pose_estimate_state.armed {
+                            goal_state.armed = false;
+                        }
+                    }
+                }
+            });
+        });
+
+    egui::TopBottomPanel::bottom("viewbar")
+        .exact_height(32.0)
+        .show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
                 if ui.button("Reset view").on_hover_text("F").clicked() {
                     camera.reset_default();
                 }
@@ -438,58 +568,7 @@ pub fn draw(
                             }
                         }
                     });
-                #[cfg(feature = "ros")]
-                {
-                    ui.separator();
-                    if ui
-                        .button("Add")
-                        .on_hover_text("Subscribe to a topic on the live ROS graph")
-                        .clicked()
-                    {
-                        discoverer.open = !discoverer.open;
-                    }
-                    if ui
-                        .button("Save config…")
-                        .on_hover_text("Save displayed topics + current view to a config file")
-                        .clicked()
-                    {
-                        save_state.open = !save_state.open;
-                    }
-                    if ui
-                        .button("Publish…")
-                        .on_hover_text("Publish a JSON message to a ROS topic")
-                        .clicked()
-                    {
-                        publish_state.open = !publish_state.open;
-                    }
-                    ui.separator();
-                    ui.label("Goal");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut goal_state.topic)
-                            .desired_width(110.0)
-                            .hint_text("/goal_pose"),
-                    )
-                    .on_hover_text("Topic the goal-pose tool publishes to");
-                    let btn = egui::Button::new("Set Goal").fill(if goal_state.armed {
-                        theme::accent()
-                    } else {
-                        ui.visuals().widgets.inactive.bg_fill
-                    });
-                    if ui
-                        .add(btn)
-                        .on_hover_text(
-                            "Click, then click-drag on the ground to set position + heading",
-                        )
-                        .clicked()
-                    {
-                        goal_state.armed = !goal_state.armed;
-                    }
-                }
-                #[cfg(not(feature = "ros"))]
-                {
-                    let _ = &discoverer;
-                    let _ = &save_state;
-                }
+
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     // Theme toggle — sun in dark mode (click to go light),
                     // moon in light mode. Unicode glyphs render via egui's
@@ -533,6 +612,41 @@ pub fn draw(
         .default_width(260.0)
         .show(ctx, |ui| {
             ui.add_space(4.0);
+            #[cfg(feature = "ros")]
+            {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Add")
+                        .on_hover_text("Subscribe to a topic on the live ROS graph")
+                        .clicked()
+                    {
+                        discoverer.open = !discoverer.open;
+                    }
+                    if ui
+                        .button("Save config…")
+                        .on_hover_text("Save displayed topics + current view to a config file")
+                        .clicked()
+                    {
+                        save_state.open = !save_state.open;
+                    }
+                    if ui
+                        .button("Load config…")
+                        .on_hover_text(
+                            "Load topics + styles + view from a config file (replaces the current session)",
+                        )
+                        .clicked()
+                    {
+                        load_state.open = !load_state.open;
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            #[cfg(not(feature = "ros"))]
+            {
+                let _ = &discoverer;
+                let _ = &save_state;
+                let _ = &load_state;
+            }
             ui.heading("Entities");
             ui.label(
                 RichText::new(format!("reference frame · {}", scene.reference_frame))
@@ -564,60 +678,91 @@ pub fn draw(
                 })
                 .collect();
 
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                for (gi, group) in groups.iter_mut().enumerate() {
-                    let members: Vec<EntityId> = all_ids
-                        .iter()
-                        .zip(assigned.iter())
-                        .filter_map(|(id, a)| (*a == Some(gi)).then_some(*id))
-                        .collect();
-                    let show_tf_scale = group.tf;
-                    draw_group(
-                        ui,
-                        scene,
-                        group,
-                        &members,
-                        edit_state,
-                        if show_tf_scale { Some(tf_axis_length) } else { None },
-                        remove_requests,
-                    );
+            // Bottom-up so the Edit row is pinned below the scroll area
+            // (added first => placed at the very bottom) while the
+            // ScrollArea (added last) claims the remaining space above it.
+            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                let enabled = selection
+                    .selected
+                    .and_then(|id| scene.entities.get(&id))
+                    .map(|e| is_editable(&e.primitive))
+                    .unwrap_or(false);
+                if ui
+                    .add_enabled(enabled, egui::Button::new("Edit size/shape…"))
+                    .clicked()
+                {
+                    edit_popup.target = selection.selected;
+                    edit_popup.open = true;
                 }
+                ui.separator();
 
-                let ungrouped: Vec<EntityId> = all_ids
-                    .iter()
-                    .zip(assigned.iter())
-                    .filter_map(|(id, a)| a.is_none().then_some(*id))
-                    .collect();
-                if !ungrouped.is_empty() {
-                    if !groups.is_empty() {
-                        ui.separator();
-                    }
-                    // Synthetic group for orphan entities. Collapsed by default
-                    // and topic-bucketed inside, same as the configured groups.
-                    let mut synth = UiGroupView {
-                        name: "Ungrouped".to_string(),
-                        topics: Vec::new(),
-                        urdf: false,
-                        tf: false,
-                        open: false,
-                    };
-                    draw_group(
-                        ui,
-                        scene,
-                        &mut synth,
-                        &ungrouped,
-                        edit_state,
-                        None,
-                        remove_requests,
-                    );
-                }
+                // The scroll area's inner content inherits whatever layout
+                // direction is active on `ui` when `.show()` is called (it
+                // doesn't force top-down itself). Without this explicit
+                // override it would inherit the bottom-up layout above and
+                // stack entities upward, off the top of the viewport.
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        for (gi, group) in groups.iter_mut().enumerate() {
+                            let members: Vec<EntityId> = all_ids
+                                .iter()
+                                .zip(assigned.iter())
+                                .filter_map(|(id, a)| (*a == Some(gi)).then_some(*id))
+                                .collect();
+                            let show_tf_scale = group.tf;
+                            draw_group(
+                                ui,
+                                scene,
+                                group,
+                                &members,
+                                selection,
+                                edit_popup,
+                                if show_tf_scale { Some(tf_axis_length) } else { None },
+                                remove_requests,
+                            );
+                        }
+
+                        let ungrouped: Vec<EntityId> = all_ids
+                            .iter()
+                            .zip(assigned.iter())
+                            .filter_map(|(id, a)| a.is_none().then_some(*id))
+                            .collect();
+                        if !ungrouped.is_empty() {
+                            if !groups.is_empty() {
+                                ui.separator();
+                            }
+                            // Synthetic group for orphan entities. Collapsed by default
+                            // and topic-bucketed inside, same as the configured groups.
+                            let mut synth = UiGroupView {
+                                name: "Ungrouped".to_string(),
+                                topics: Vec::new(),
+                                urdf: false,
+                                tf: false,
+                                open: false,
+                            };
+                            draw_group(
+                                ui,
+                                scene,
+                                &mut synth,
+                                &ungrouped,
+                                selection,
+                                edit_popup,
+                                None,
+                                remove_requests,
+                            );
+                        }
+                    });
+                });
             });
         });
+
+    draw_edit_popup(ctx, scene, edit_popup, edit_state);
 
     #[cfg(feature = "ros")]
     if let Some(tctx) = topic_ctx {
         draw_add_topics(ctx, discoverer, tctx, add_requests);
         draw_save_config(ctx, save_state, tctx, scene, groups, *tf_axis_length, camera);
+        draw_load_config(ctx, load_state, load_request);
         draw_publish(ctx, publish_state, tctx, publish_requests);
     }
 }
@@ -863,6 +1008,57 @@ fn draw_save_config(
     state.open = open;
 }
 
+/// "Load config" window — parse a config file at the given path and rebuild
+/// the session from it, mirroring what `--config` does at process start.
+#[cfg(feature = "ros")]
+fn draw_load_config(
+    ctx: &egui::Context,
+    state: &mut LoadConfigState,
+    load_request: &mut Option<std::path::PathBuf>,
+) {
+    let mut open = state.open;
+    egui::Window::new("Load config")
+        .resizable(false)
+        .default_width(420.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(
+                "Loads topics, styles, TF axis length and camera view from a \
+                 config file, replacing the current session (like restarting \
+                 with --config).",
+            );
+            ui.separator();
+            if state.path.is_empty() {
+                state.path = "fastviz.toml".to_string();
+            }
+            let mut load_clicked = false;
+            ui.horizontal(|ui| {
+                ui.label("Path:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.path)
+                        .desired_width(280.0)
+                        .hint_text("fastviz.toml"),
+                );
+                load_clicked = (resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    || ui.button("Load").clicked();
+            });
+            if load_clicked {
+                let trimmed = state.path.trim();
+                if trimmed.is_empty() {
+                    state.status = Some("enter a path".to_string());
+                } else {
+                    *load_request = Some(std::path::PathBuf::from(trimmed));
+                }
+            }
+            if let Some(msg) = &state.status {
+                ui.separator();
+                ui.label(msg);
+            }
+        });
+    state.open = open;
+}
+
 /// Write `toml` to `<name>.toml` in the current working directory and return a
 /// status line quoting the fully-resolved path (or the error).
 #[cfg(feature = "ros")]
@@ -1033,7 +1229,8 @@ fn draw_group(
     scene: &mut SceneGraph,
     group: &mut UiGroupView,
     members: &[EntityId],
-    edit_state: &mut EntityEditState,
+    selection: &mut SelectionState,
+    edit_popup: &mut EditPopupState,
     tf_axis_length: Option<&mut f32>,
     remove_requests: &mut Vec<String>,
 ) {
@@ -1067,7 +1264,7 @@ fn draw_group(
                 // the group header without an extra collapser per frame.
                 if group.tf {
                     for id in members {
-                        draw_entity_leaf(ui, scene, *id, edit_state);
+                        draw_entity_leaf(ui, scene, *id, selection, edit_popup);
                     }
                     return;
                 }
@@ -1085,10 +1282,10 @@ fn draw_group(
                     }
                 }
                 for (topic, ids) in &by_topic {
-                    draw_topic_bucket(ui, scene, topic, ids, edit_state, remove_requests);
+                    draw_topic_bucket(ui, scene, topic, ids, selection, edit_popup, remove_requests);
                 }
                 for id in &topicless {
-                    draw_entity_leaf(ui, scene, *id, edit_state);
+                    draw_entity_leaf(ui, scene, *id, selection, edit_popup);
                 }
             });
         group.open = resp.openness > 0.5;
@@ -1097,14 +1294,35 @@ fn draw_group(
 
 /// One bucket per topic. Header is collapsed by default. If the bucket
 /// contains marker entities, sub-buckets by namespace (also collapsed).
+#[allow(clippy::too_many_arguments)]
 fn draw_topic_bucket(
     ui: &mut egui::Ui,
     scene: &mut SceneGraph,
     topic: &str,
     ids: &[EntityId],
-    edit_state: &mut EntityEditState,
+    selection: &mut SelectionState,
+    edit_popup: &mut EditPopupState,
     remove_requests: &mut Vec<String>,
 ) {
+    // A topic with exactly one entity has nothing to disclose under a
+    // "topic (1)" header identical to the single leaf inside it — render it
+    // as a flat row instead (eye, ✕, label — no expander).
+    if ids.len() == 1 {
+        ui.horizontal(|ui| {
+            eye_toggle(ui, scene, ids, ("topic_eye", topic));
+            if cfg!(feature = "ros")
+                && ui
+                    .small_button("\u{2715}")
+                    .on_hover_text("Remove this topic from the view (stops its subscription)")
+                    .clicked()
+            {
+                remove_requests.push(topic.to_string());
+            }
+            draw_entity_row(ui, scene, ids[0], selection, edit_popup, false);
+        });
+        return;
+    }
+
     ui.horizontal(|ui| {
         eye_toggle(ui, scene, ids, ("topic_eye", topic));
         // Permanent removal — only meaningful with a live ROS node behind it.
@@ -1140,16 +1358,16 @@ fn draw_topic_bucket(
                     // doesn't have to click through a single "(no ns)" header.
                     if by_ns.len() == 1 && by_ns.contains_key("") {
                         for id in ids {
-                            draw_entity_leaf(ui, scene, *id, edit_state);
+                            draw_entity_leaf(ui, scene, *id, selection, edit_popup);
                         }
                     } else {
                         for (ns, ns_ids) in &by_ns {
-                            draw_ns_bucket(ui, scene, topic, ns, ns_ids, edit_state);
+                            draw_ns_bucket(ui, scene, topic, ns, ns_ids, selection, edit_popup);
                         }
                     }
                 } else {
                     for id in ids {
-                        draw_entity_leaf(ui, scene, *id, edit_state);
+                        draw_entity_leaf(ui, scene, *id, selection, edit_popup);
                     }
                 }
             });
@@ -1162,7 +1380,8 @@ fn draw_ns_bucket(
     topic: &str,
     ns: &str,
     ids: &[EntityId],
-    edit_state: &mut EntityEditState,
+    selection: &mut SelectionState,
+    edit_popup: &mut EditPopupState,
 ) {
     let header = if ns.is_empty() {
         format!("(no ns)  ({})", ids.len())
@@ -1176,19 +1395,81 @@ fn draw_ns_bucket(
             .default_open(false)
             .show(ui, |ui| {
                 for id in ids {
-                    draw_entity_leaf(ui, scene, *id, edit_state);
+                    draw_entity_leaf(ui, scene, *id, selection, edit_popup);
                 }
             });
     });
 }
 
-/// Leaf row for a single entity. The expander reveals the color/scale editor.
+/// Leaf row for a single entity: eye toggle + a selectable label. Left-click
+/// selects the entity; right-click opens a context menu that also selects it
+/// and (when the entity is editable) offers "Edit size/shape…", which opens
+/// the shared floating style-editor popup.
 fn draw_entity_leaf(
     ui: &mut egui::Ui,
     scene: &mut SceneGraph,
     id: EntityId,
+    selection: &mut SelectionState,
+    edit_popup: &mut EditPopupState,
+) {
+    ui.horizontal(|ui| {
+        draw_entity_row(ui, scene, id, selection, edit_popup, true);
+    });
+}
+
+/// Row body for a single entity: an optional eye toggle (`with_eye` is false
+/// when the caller — e.g. a single-entity topic bucket — already drew its
+/// own), then a selectable label with the selection + context-menu behavior
+/// shared by every entity row.
+fn draw_entity_row(
+    ui: &mut egui::Ui,
+    scene: &mut SceneGraph,
+    id: EntityId,
+    selection: &mut SelectionState,
+    edit_popup: &mut EditPopupState,
+    with_eye: bool,
+) {
+    let Some(e) = scene.entities.get(&id) else {
+        return;
+    };
+    let display = e
+        .label
+        .clone()
+        .unwrap_or_else(|| format!("entity #{}", id.0));
+    let kind = primitive_label(&e.primitive);
+    let editable = is_editable(&e.primitive);
+
+    if with_eye {
+        eye_toggle(ui, scene, std::slice::from_ref(&id), ("entity_eye", id.0));
+    }
+    let selected = selection.selected == Some(id);
+    let resp = ui.selectable_label(selected, format!("{display}  ({kind})"));
+    if resp.clicked() {
+        selection.selected = Some(id);
+    }
+    resp.context_menu(|ui| {
+        selection.selected = Some(id);
+        if editable && ui.button("Edit size/shape…").clicked() {
+            edit_popup.target = Some(id);
+            edit_popup.open = true;
+            ui.close_menu();
+        }
+    });
+}
+
+/// Floating "Edit — <label>" window driven by either the row context menu or
+/// the pinned Edit button. Renders `draw_entity_style_editor` for whichever
+/// entity `edit_popup.target` names; closes itself if that entity vanishes.
+fn draw_edit_popup(
+    ctx: &egui::Context,
+    scene: &mut SceneGraph,
+    edit_popup: &mut EditPopupState,
     edit_state: &mut EntityEditState,
 ) {
+    let Some(id) = edit_popup.target else { return };
+    if !edit_popup.open {
+        return;
+    }
     let (display, kind, current_color, current_scale, is_frame, prim_kind, current_head) =
         match scene.entities.get(&id) {
             Some(e) => (
@@ -1202,29 +1483,32 @@ fn draw_entity_leaf(
                 StyleEditKind::of(&e.primitive),
                 scene::primitive_head_radius(&e.primitive),
             ),
-            None => return,
+            None => {
+                edit_popup.open = false;
+                edit_popup.target = None;
+                return;
+            }
         };
 
-    ui.horizontal(|ui| {
-        eye_toggle(ui, scene, std::slice::from_ref(&id), ("entity_eye", id.0));
-        let header_resp = egui::CollapsingHeader::new(format!("{display}  ({kind})"))
-            .id_salt(("entity", id.0))
-            .default_open(false)
-            .show(ui, |ui| {
-                draw_entity_style_editor(
-                    ui,
-                    scene,
-                    id,
-                    current_color,
-                    current_scale,
-                    is_frame,
-                    prim_kind,
-                    current_head,
-                    edit_state,
-                );
-            });
-        let _ = header_resp;
-    });
+    let mut open = edit_popup.open;
+    egui::Window::new(format!("Edit — {display}  ({kind})"))
+        .id(egui::Id::new("style_edit_popup"))
+        .resizable(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            draw_entity_style_editor(
+                ui,
+                scene,
+                id,
+                current_color,
+                current_scale,
+                is_frame,
+                prim_kind,
+                current_head,
+                edit_state,
+            );
+        });
+    edit_popup.open = open;
 }
 
 /// Which per-entity scale control to present in the style editor. Most

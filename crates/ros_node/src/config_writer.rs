@@ -248,6 +248,25 @@ pub fn to_toml_full(
             out.push_str("length = 0.5\nshaft_radius = 0.025\nhead_radius = 0.06\n");
             out.push_str(&format!("color = {}\n\n", fmt_rgb(color)));
         }
+        if poses.len() > 1 {
+            for t in &poses {
+                if let Some((color, scale, head_radius, shaft_radius)) =
+                    entity_style_for_topic(t, scene)
+                {
+                    out.push_str(&format!("[poses.style.{}]\n", toml_string(t)));
+                    out.push_str(&format!("length = {}\n", fmt_f(scale.unwrap_or(0.5))));
+                    out.push_str(&format!(
+                        "shaft_radius = {}\n",
+                        fmt_f(shaft_radius.unwrap_or(0.025))
+                    ));
+                    out.push_str(&format!(
+                        "head_radius = {}\n",
+                        fmt_f(head_radius.unwrap_or(0.06))
+                    ));
+                    out.push_str(&format!("color = {}\n\n", fmt_rgb(color)));
+                }
+            }
+        }
     }
     if !pose_arrays.is_empty() {
         out.push_str("[pose_arrays]\n");
@@ -255,42 +274,98 @@ pub fn to_toml_full(
             "topics = [{}]\n\n",
             toml_string_list(&pose_arrays)
         ));
+        if pose_arrays.len() > 1 {
+            for t in &pose_arrays {
+                if let Some((color, scale, head_radius, shaft_radius)) =
+                    entity_style_for_topic(t, scene)
+                {
+                    out.push_str(&format!("[pose_arrays.style.{}]\n", toml_string(t)));
+                    out.push_str(&format!("length = {}\n", fmt_f(scale.unwrap_or(0.5))));
+                    out.push_str(&format!(
+                        "shaft_radius = {}\n",
+                        fmt_f(shaft_radius.unwrap_or(0.025))
+                    ));
+                    out.push_str(&format!(
+                        "head_radius = {}\n",
+                        fmt_f(head_radius.unwrap_or(0.06))
+                    ));
+                    out.push_str(&format!("color = {}\n\n", fmt_rgb(color)));
+                }
+            }
+        }
     }
     if !paths.is_empty() {
         out.push_str("[paths]\n");
         out.push_str(&format!("topics = [{}]\n", toml_string_list(&paths)));
-        if let Some((color, scale)) = first_color_scale(&paths, scene) {
-            out.push_str(&format!(
-                "style = {{ width = {}, color = {} }}\n",
-                fmt_f(scale.unwrap_or(2.0)),
-                fmt_rgb(color)
-            ));
+        // A bare `style = {...}` and per-topic `[paths.style."<topic>"]` blocks
+        // share the same TOML key, so they're mutually exclusive per file.
+        if paths.len() <= 1 {
+            if let Some((color, scale)) = first_color_scale(&paths, scene) {
+                out.push_str(&format!(
+                    "style = {{ width = {}, color = {} }}\n",
+                    fmt_f(scale.unwrap_or(2.0)),
+                    fmt_rgb(color)
+                ));
+            }
         }
         out.push('\n');
+        if paths.len() > 1 {
+            for t in &paths {
+                if let Some((color, scale, _, _)) = entity_style_for_topic(t, scene) {
+                    out.push_str(&format!("[paths.style.{}]\n", toml_string(t)));
+                    out.push_str(&format!("width = {}\n", fmt_f(scale.unwrap_or(0.05))));
+                    out.push_str(&format!("color = {}\n\n", fmt_rgb(color)));
+                }
+            }
+        }
     }
     if !scans.is_empty() {
         out.push_str("[scans]\n");
         out.push_str(&format!("topics = [{}]\n", toml_string_list(&scans)));
-        if let Some((color, scale)) = first_color_scale(&scans, scene) {
-            out.push_str(&format!(
-                "style = {{ size = {}, color = {} }}\n",
-                fmt_f(scale.unwrap_or(4.0)),
-                fmt_rgb(color)
-            ));
+        if scans.len() <= 1 {
+            if let Some((color, scale)) = first_color_scale(&scans, scene) {
+                out.push_str(&format!(
+                    "style = {{ size = {}, color = {} }}\n",
+                    fmt_f(scale.unwrap_or(4.0)),
+                    fmt_rgb(color)
+                ));
+            }
         }
         out.push('\n');
+        if scans.len() > 1 {
+            for t in &scans {
+                if let Some((color, scale, _, _)) = entity_style_for_topic(t, scene) {
+                    out.push_str(&format!("[scans.style.{}]\n", toml_string(t)));
+                    out.push_str(&format!("size = {}\n", fmt_f(scale.unwrap_or(4.0))));
+                    out.push_str(&format!("color = {}\n\n", fmt_rgb(color)));
+                }
+            }
+        }
     }
     if !points.is_empty() {
         out.push_str("[points]\n");
         out.push_str(&format!("topics = [{}]\n", toml_string_list(&points)));
-        if let Some((color, scale)) = first_color_scale(&points, scene) {
-            out.push_str(&format!(
-                "style = {{ size = {}, color = {} }}\n",
-                fmt_f(scale.unwrap_or(2.0)),
-                fmt_rgb(color)
-            ));
+        if points.len() <= 1 {
+            if let Some((color, scale)) = first_color_scale(&points, scene) {
+                out.push_str(&format!(
+                    "style = {{ size = {}, color = {} }}\n",
+                    fmt_f(scale.unwrap_or(2.0)),
+                    fmt_rgb(color)
+                ));
+            }
         }
         out.push('\n');
+        if points.len() > 1 {
+            for t in &points {
+                if let Some((color, scale, _, _)) = entity_style_for_topic(t, scene) {
+                    out.push_str(&format!("[points.style.{}]\n", toml_string(t)));
+                    if let Some(scale) = scale {
+                        out.push_str(&format!("size = {}\n", fmt_f(scale)));
+                    }
+                    out.push_str(&format!("color = {}\n\n", fmt_rgb(color)));
+                }
+            }
+        }
     }
     if !markers.is_empty() {
         out.push_str("[markers]\n");
@@ -351,6 +426,34 @@ fn first_color_scale(
                 return Some((c, scene::primitive_scale(&entity.primitive)));
             }
         }
+    }
+    None
+}
+
+/// `(color, scale, head_radius, shaft_radius)` — the last two are `None` for
+/// anything but Arrows.
+type EntityStyle = (scene::Color, Option<f32>, Option<f32>, Option<f32>);
+
+/// Live style of the entity matching `topic` exactly (by label token), if any.
+fn entity_style_for_topic(topic: &str, scene: &SceneGraph) -> Option<EntityStyle> {
+    for entity in scene.entities.values() {
+        let label_token = entity
+            .label
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if label_token != topic {
+            continue;
+        }
+        let color = scene::primitive_color(&entity.primitive)?;
+        return Some((
+            color,
+            scene::primitive_scale(&entity.primitive),
+            scene::primitive_head_radius(&entity.primitive),
+            scene::primitive_shaft_radius(&entity.primitive),
+        ));
     }
     None
 }
@@ -467,5 +570,73 @@ mod tests {
         let out = to_toml(&s, &["/scan_front".to_string()], "map");
         assert!(out.contains("/scan_front"));
         assert!(!out.contains("/scan_back"));
+    }
+
+    fn path_entity(id: u64, label: &str, color: scene::Color, width: f32) -> scene::SceneEntity {
+        scene::SceneEntity::new(
+            scene::EntityId(id),
+            scene::ScenePrimitive::Polyline(scene::Polyline {
+                points: Vec::new(),
+                color,
+                width,
+            }),
+        )
+        .with_label(label)
+    }
+
+    #[test]
+    fn multi_topic_paths_emit_distinct_per_topic_style_blocks() {
+        let s = snap(&[
+            ("/plan", &[path::MSG_TYPE]),
+            ("/global_plan", &[path::MSG_TYPE]),
+        ]);
+        let mut scene = SceneGraph::new("map");
+        scene.upsert(path_entity(
+            1,
+            "/plan",
+            scene::Color::rgb(1.0, 0.0, 0.0),
+            0.05,
+        ));
+        scene.upsert(path_entity(
+            2,
+            "/global_plan",
+            scene::Color::rgb(0.0, 0.0, 1.0),
+            0.05,
+        ));
+        let selected: Vec<String> = s.iter().map(|(t, _)| t.clone()).collect();
+        let out = to_toml_full(&s, &selected, "map", &scene, 0.3, &[], None);
+        assert!(out.contains("[paths.style.\"/plan\"]"));
+        assert!(out.contains("[paths.style.\"/global_plan\"]"));
+        assert!(!out.contains("style = {"));
+
+        let raw: crate::config::RawConfig = toml::from_str(&out).expect("parses");
+        let cfg = raw.into_runtime();
+        let a = cfg.path_style_for("/plan");
+        let b = cfg.path_style_for("/global_plan");
+        assert_ne!(a.color, b.color);
+        assert_eq!(a.color, scene::Color::rgb(1.0, 0.0, 0.0));
+        assert_eq!(b.color, scene::Color::rgb(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn single_topic_path_emits_no_per_topic_style_block() {
+        let s = snap(&[("/plan", &[path::MSG_TYPE])]);
+        let mut scene = SceneGraph::new("map");
+        scene.upsert(path_entity(
+            1,
+            "/plan",
+            scene::Color::rgb(1.0, 0.0, 0.0),
+            0.05,
+        ));
+        let out = to_toml_full(
+            &s,
+            &["/plan".to_string()],
+            "map",
+            &scene,
+            0.3,
+            &[],
+            None,
+        );
+        assert!(!out.contains("[paths.style."));
     }
 }

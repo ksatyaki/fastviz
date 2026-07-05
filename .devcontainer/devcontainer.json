@@ -10,7 +10,7 @@
 // docker-compose.yml. On a non-NVIDIA host, drop the `deploy:` block from
 // docker-compose.yml and Mesa llvmpipe will be used.
 {
-    "name": "fastviz dev (jazzy + vulkan)",
+    "name": "fastviz dev (humble + vulkan)",
     "dockerComposeFile": "../docker-compose.yml",
     "service": "humble",
     "workspaceFolder": "/workspaces/fastviz",

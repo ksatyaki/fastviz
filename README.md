@@ -4,15 +4,11 @@ A Rust-based ROS2 visualizer built on `wgpu` + `egui`. RViz alternative.
 
 <img src="Screenshot.png" alt="Screenshot" width="720"/>
 
-## Install
+## Quickstart (.deb)
 
-### Prebuilt release (Linux x86_64)
+Each tagged release publishes Ubuntu 22.04 / ROS Humble and Ubuntu 24.04 / ROS Jazzy artifacts on the [Releases page](../../releases), as both a tarball and a `.deb`. The `.deb` is the fastest path — it declares all runtime dependencies, including the ROS message packages and Vulkan loader, so `apt` pulls them in for you.
 
-Each tagged release publishes Ubuntu 22.04 / ROS Humble and Ubuntu 24.04 / ROS Jazzy artifacts on the [Releases page](../../releases) — both as a tarball and as a `.deb`.
-
-#### Option A — .deb (recommended)
-
-The `.deb` declares all runtime dependencies, including the ROS message packages and Vulkan loader, so `apt` pulls them in for you. Pick the file that matches your distro:
+Pick the file that matches your distro:
 
 | OS                  | Asset                                            |
 | ------------------- | ------------------------------------------------ |
@@ -27,7 +23,121 @@ fastviz --config /usr/share/fastviz/configs/default.toml
 
 The installed binary has the ROS lib directory baked into its rpath, so you do *not* need to `source /opt/ros/<distro>/setup.bash` before launching it.
 
-#### Option B — tarball
+Replace `OWNER/REPO` with the repo slug (or just download the asset from the Releases page in a browser). For other install options (tarball, building from source, dev container), see [Dev setup](#dev-setup) below.
+
+## Use
+
+Source ROS2 first, then launch with a config file:
+
+```sh
+source /opt/ros/jazzy/setup.bash
+fastviz --config configs/default.toml
+```
+
+Common invocations:
+
+```sh
+# TurtleBot 4 Gazebo sim — picks the URDF up off /robot_description
+fastviz --config configs/turtlebot4.toml
+
+# Override the reference frame from the CLI (wins over the config file)
+fastviz --config configs/default.toml --ref-frame odom
+
+# Load a URDF from a file directly (skips /robot_description)
+fastviz --config configs/default.toml --urdf /path/to/robot.urdf
+```
+
+### Supported message types
+
+| Topic kind                          | Message                          | Scene primitive  |
+| ----------------------------------- | --------------------------------- | ---------------- |
+| `[map]`                             | `nav_msgs/OccupancyGrid`         | `Grid`           |
+| `[poses]`                           | `geometry_msgs/PoseStamped`      | `Arrow`          |
+| `[pose_arrays]`                     | `geometry_msgs/PoseArray`        | `Arrows`         |
+| `[paths]`                           | `nav_msgs/Path`                  | `Polyline`       |
+| `[scans]`                           | `sensor_msgs/LaserScan`          | `Points`         |
+| `[points]`                          | `sensor_msgs/PointCloud2`        | `Points`         |
+| `[markers]`                         | `visualization_msgs/Marker`      | mixed primitives |
+| `[marker_arrays]`                   | `visualization_msgs/MarkerArray` | mixed primitives |
+| `[tf]` (`/tf`, `/tf_static`)        | `tf2_msgs/TFMessage`             | TF tree          |
+| `[urdf]` (`/robot_description`)     | `std_msgs/String` + `JointState` | meshes + FK      |
+
+Mesh files referenced from a URDF can be `.stl`, `.obj`, or `.dae` (Collada). `package://` URIs are resolved through `AMENT_PREFIX_PATH`.
+
+### Controls
+
+- Left mouse drag — orbit
+- Right mouse drag — pan
+- Scroll — zoom
+- `F` — reset view
+- `T` — top-down view
+- `S` — side view
+- `Esc` — quit
+
+In-app, the left panel's **Add** button subscribes to a live topic without restarting; **Save config…** writes every displayed topic, its style, the TF axis length, and the current camera view to a `.toml` file; **Load config…** parses a `.toml` file and rebuilds the session from it at runtime (equivalent to restarting with `--config`, but without leaving the app). Right-click an entity row (or select it and click the pinned **Edit size/shape…** button) to open the style editor for its color, size, and — for arrows — head radius.
+
+### CLI
+
+```
+fastviz [--ref-frame FRAME] [--config PATH] [--urdf PATH] [--width N] [--height N]
+```
+
+`--ref-frame` and `--urdf` win over the matching config-file values when both are set.
+
+## Configuration
+
+[configs/default.toml](configs/default.toml) mirrors `RosConfig::default()` and is the source of truth. Other presets live alongside it (e.g. [configs/turtlebot4.toml](configs/turtlebot4.toml)). Key features:
+
+- Each per-message kind (`[map]`, `[poses]`, `[pose_arrays]`, `[paths]`, `[scans]`, `[points]`, `[markers]`, `[marker_arrays]`) takes a `topics = [...]` list.
+- A bare `"*"` element enables polled discovery: anything in the ROS graph with the matching message type is auto-subscribed within ~1 s. Works for the per-message kinds above (not `[map]`, which is single-topic).
+- Per-topic QoS overrides via `[<kind>.qos."<topic>"]`: `reliability`, `durability`, `depth`.
+- Visual style per kind (`arrow`, `paths.style`, `scans.style`, `points.style`).
+- Per-topic style overrides for poses, pose_arrays, paths, scans, and points — e.g. `[paths.style."/plan"]` — let one topic in a multi-topic category override the category default's color/size independently of the others. The **Save config…** button in the app writes these automatically once a category has more than one topic (baking in each topic's live color/scale from the entity editor); a category's per-topic map and its flat `style = {...}` default share the same TOML key, so a file uses one form or the other per category, not both.
+- `[tf]` block lets you remap `/tf` / `/tf_static` topic names + override their QoS — handy for robots that publish under a namespace.
+- `[urdf]` block: set either `path` (URDF/xacro file on disk) or `topic` (`std_msgs/String` topic carrying the URDF XML, typically `/robot_description`). `joint_states_topic` defaults to `/joint_states`.
+
+Example with wildcard scans, a per-topic QoS override on `/map`, and a robot loaded off `/robot_description`:
+
+```toml
+reference_frame = "map"
+
+[tf]
+topic        = "/tf"
+static_topic = "/tf_static"
+
+[urdf]
+topic              = "/robot_description"
+joint_states_topic = "/joint_states"
+
+[map]
+topics = ["/map"]
+[map.qos."/map"]
+durability  = "transient_local"
+reliability = "reliable"
+
+[scans]
+topics = ["*"]                # auto-discover every sensor_msgs/LaserScan
+style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
+```
+
+Example with two path topics that each get their own color (per-topic style):
+
+```toml
+[paths]
+topics = ["/plan_a", "/plan_b"]
+
+[paths.style."/plan_a"]
+width = 0.08
+color = [1.0, 0.0, 0.0]
+
+[paths.style."/plan_b"]
+width = 0.03
+color = [0.0, 0.5, 1.0]
+```
+
+## Dev setup
+
+### Tarball install
 
 ```sh
 tag=$(curl -s https://api.github.com/repos/OWNER/REPO/releases/latest | grep -oE '"tag_name": *"[^"]+"' | cut -d'"' -f4)
@@ -40,7 +150,7 @@ sudo install -m 0755 "${asset%.tar.gz}" /usr/local/bin/fastviz
 
 Replace `OWNER/REPO` with the repo slug (or just download the asset from the Releases page in a browser).
 
-### Runtime dependencies (tarball only — the .deb pulls these in)
+#### Runtime dependencies (tarball only — the .deb pulls these in)
 
 The release binary is dynamically linked. On the host you'll need:
 
@@ -95,98 +205,6 @@ The `.deb` installs a desktop entry + icon system-wide, so a packaged install sh
 ```
 
 It drops the same `fastviz.desktop` + icon into `~/.local/share`, matching the window's `app_id` (`fastviz`). On an X11/XWayland session the icon already works without this, since it's sent over the wire by the app itself.
-
-## Use
-
-Source ROS2 first, then launch with a config file:
-
-```sh
-source /opt/ros/jazzy/setup.bash
-fastviz --config configs/default.toml
-```
-
-Common invocations:
-
-```sh
-# TurtleBot 4 Gazebo sim — picks the URDF up off /robot_description
-fastviz --config configs/turtlebot4.toml
-
-# Override the reference frame from the CLI (wins over the config file)
-fastviz --config configs/default.toml --ref-frame odom
-
-# Load a URDF from a file directly (skips /robot_description)
-fastviz --config configs/default.toml --urdf /path/to/robot.urdf
-```
-
-### Supported message types
-
-| Topic kind                          | Message                          | Scene primitive  |
-| ----------------------------------- | -------------------------------- | ---------------- |
-| `[map]`                             | `nav_msgs/OccupancyGrid`         | `Grid`           |
-| `[poses]`                           | `geometry_msgs/PoseStamped`      | `Arrow`          |
-| `[pose_arrays]`                     | `geometry_msgs/PoseArray`        | `Arrows`         |
-| `[paths]`                           | `nav_msgs/Path`                  | `Polyline`       |
-| `[scans]`                           | `sensor_msgs/LaserScan`          | `Points`         |
-| `[points]`                          | `sensor_msgs/PointCloud2`        | `Points`         |
-| `[markers]`                         | `visualization_msgs/Marker`      | mixed primitives |
-| `[marker_arrays]`                   | `visualization_msgs/MarkerArray` | mixed primitives |
-| `[tf]` (`/tf`, `/tf_static`)        | `tf2_msgs/TFMessage`             | TF tree          |
-| `[urdf]` (`/robot_description`)     | `std_msgs/String` + `JointState` | meshes + FK      |
-
-Mesh files referenced from a URDF can be `.stl`, `.obj`, or `.dae` (Collada). `package://` URIs are resolved through `AMENT_PREFIX_PATH`.
-
-### Controls
-
-- Left mouse drag — orbit
-- Right mouse drag — pan
-- Scroll — zoom
-- `F` — reset view
-- `T` — top-down view
-- `S` — side view
-- `Esc` — quit
-
-### CLI
-
-```
-fastviz [--ref-frame FRAME] [--config PATH] [--urdf PATH] [--width N] [--height N]
-```
-
-`--ref-frame` and `--urdf` win over the matching config-file values when both are set.
-
-## Configuration
-
-[configs/default.toml](configs/default.toml) mirrors `RosConfig::default()` and is the source of truth. Other presets live alongside it (e.g. [configs/turtlebot4.toml](configs/turtlebot4.toml)). Key features:
-
-- Each per-message kind (`[map]`, `[poses]`, `[pose_arrays]`, `[paths]`, `[scans]`, `[points]`, `[markers]`, `[marker_arrays]`) takes a `topics = [...]` list.
-- A bare `"*"` element enables polled discovery: anything in the ROS graph with the matching message type is auto-subscribed within ~1 s. Works for the per-message kinds above (not `[map]`, which is single-topic).
-- Per-topic QoS overrides via `[<kind>.qos."<topic>"]`: `reliability`, `durability`, `depth`.
-- Visual style per kind (`arrow`, `paths.style`, `scans.style`, `points.style`).
-- `[tf]` block lets you remap `/tf` / `/tf_static` topic names + override their QoS — handy for robots that publish under a namespace.
-- `[urdf]` block: set either `path` (URDF/xacro file on disk) or `topic` (`std_msgs/String` topic carrying the URDF XML, typically `/robot_description`). `joint_states_topic` defaults to `/joint_states`.
-
-Example with wildcard scans, a per-topic QoS override on `/map`, and a robot loaded off `/robot_description`:
-
-```toml
-reference_frame = "map"
-
-[tf]
-topic        = "/tf"
-static_topic = "/tf_static"
-
-[urdf]
-topic              = "/robot_description"
-joint_states_topic = "/joint_states"
-
-[map]
-topics = ["/map"]
-[map.qos."/map"]
-durability  = "transient_local"
-reliability = "reliable"
-
-[scans]
-topics = ["*"]                # auto-discover every sensor_msgs/LaserScan
-style  = { size = 4.0, color = [1.0, 0.95, 0.20] }
-```
 
 ## Workspace layout
 

@@ -29,6 +29,10 @@ pub struct LinePass {
     instance_buffer: wgpu::Buffer,
     capacity: usize,
     instance_count: u32,
+    instances: Vec<LineInstance>,
+    /// `Some(rev)` when the buffer reflects that scene revision; `None` until
+    /// the first prepare. Only a revision change triggers a rebuild + upload.
+    last_revision: Option<u64>,
 }
 
 impl LinePass {
@@ -141,12 +145,19 @@ impl LinePass {
             instance_buffer,
             capacity: initial_capacity,
             instance_count: 0,
+            instances: Vec::new(),
+            last_revision: None,
         }
     }
 
     pub fn prepare(&mut self, gpu: &GpuContext, scene: &SceneGraph) {
-        let mut instances: Vec<LineInstance> = Vec::with_capacity(self.capacity);
+        let revision = scene.revision();
+        if self.last_revision == Some(revision) {
+            return; // scene unchanged — keep cached instance buffer + draw count
+        }
+        self.last_revision = Some(revision);
 
+        self.instances.clear();
         for entity in scene.entities.values() {
             if !entity.visible {
                 continue;
@@ -161,7 +172,7 @@ impl LinePass {
                     for pair in p.points.windows(2) {
                         let a = transform_point(entity.transform, pair[0]);
                         let b = transform_point(entity.transform, pair[1]);
-                        instances.push(LineInstance {
+                        self.instances.push(LineInstance {
                             start: a.into(),
                             end: b.into(),
                             color,
@@ -170,19 +181,19 @@ impl LinePass {
                     }
                 }
                 ScenePrimitive::Frame(f) => {
-                    push_frame_axes(&mut instances, entity.transform * f.transform, f.axis_length);
+                    push_frame_axes(&mut self.instances, entity.transform * f.transform, f.axis_length);
                 }
                 _ => {}
             }
         }
 
-        self.instance_count = instances.len() as u32;
-        if instances.is_empty() {
+        self.instance_count = self.instances.len() as u32;
+        if self.instances.is_empty() {
             return;
         }
 
-        if instances.len() > self.capacity {
-            self.capacity = (instances.len() * 2).next_power_of_two();
+        if self.instances.len() > self.capacity {
+            self.capacity = (self.instances.len() * 2).next_power_of_two();
             self.instance_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("line-instance-vb"),
                 size: (self.capacity * size_of::<LineInstance>()) as u64,
@@ -192,7 +203,7 @@ impl LinePass {
         }
 
         gpu.queue
-            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&instances));
+            .write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.instances));
     }
 
     pub fn draw<'a>(

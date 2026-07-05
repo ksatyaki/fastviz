@@ -48,6 +48,10 @@ struct AppContext {
     egui: EguiState,
     scene: Arc<RwLock<SceneGraph>>,
     mock: Option<MockInjector>,
+    /// Cloned from `App::args` so `load_config` can re-derive a `RosConfig`
+    /// the same way `resumed()` does at startup (CLI overrides included).
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    args: Args,
     #[cfg(feature = "ros")]
     ros: Option<ros_node::RosNode>,
     /// Current theme (light/dark). Persisted across runs.
@@ -67,15 +71,26 @@ struct AppContext {
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
     save_config: ui::SaveConfigState,
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    load_config: ui::LoadConfigState,
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
     publish: ui::PublishState,
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
     goal: ui::GoalToolState,
-    /// Transient goal-tool drag state (armed → pressed → dragging).
+    #[cfg_attr(not(feature = "ros"), allow(dead_code))]
+    pose_estimate: ui::PoseEstimateToolState,
+    /// Transient drag state (armed → pressed → dragging) for whichever
+    /// pose-setting tool (Goal or Estimate) is currently armed. Only one tool
+    /// can be armed at a time — arming one disarms the other in the UI.
     #[cfg(feature = "ros")]
-    goal_drag: Option<GoalDrag>,
+    pose_drag: Option<(PoseToolKind, PoseDrag)>,
     /// Per-entity color/scale text-edit buffers. Lives outside egui memory so
     /// it survives across panel rebuilds without keying on internal egui ids.
     edit_state: ui::EntityEditState,
+    /// Single-selection model for the entities panel (UI-only, never saved).
+    selection: ui::SelectionState,
+    /// Floating "Edit style" popup state, opened via right-click or the
+    /// pinned Edit button.
+    edit_popup: ui::EditPopupState,
     /// Concrete topic list (one entry per subscribed topic) used to pre-check
     /// rows in the Save-config window. Built once from the loaded RosConfig.
     #[cfg_attr(not(feature = "ros"), allow(dead_code))]
@@ -108,16 +123,25 @@ struct InputState {
     right_down: bool,
 }
 
-/// Reserved entity for the goal-pose tool's live preview arrow. Lives only
-/// during a drag; well above every ROS id range so it never collides.
+/// Reserved entity for the pose-tool's live preview arrow (Goal or Estimate).
+/// Lives only during a drag; well above every ROS id range so it never
+/// collides.
 #[cfg(feature = "ros")]
 const GOAL_PREVIEW_ID: scene::EntityId = scene::EntityId(u64::MAX - 7);
 
-/// Transient state while the goal tool is mid-drag: the ground-plane press
+/// Which pose-setting tool a drag belongs to.
+#[cfg(feature = "ros")]
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum PoseToolKind {
+    Goal,
+    Estimate,
+}
+
+/// Transient state while a pose tool is mid-drag: the ground-plane press
 /// point and the current cursor's ground hit, both in renderer-world space.
 #[cfg(feature = "ros")]
 #[derive(Copy, Clone)]
-struct GoalDrag {
+struct PoseDrag {
     start: glam::Vec3,
     current: glam::Vec3,
 }
@@ -125,6 +149,91 @@ struct GoalDrag {
 impl App {
     fn new(args: Args) -> Self {
         App { args, ctx: None }
+    }
+}
+
+/// Everything `build_ros` derives from a `RosConfig` — the pieces `resumed()`
+/// and `AppContext::load_config` both need to populate `AppContext`.
+#[cfg(feature = "ros")]
+struct RosBuild {
+    ros: Option<ros_node::RosNode>,
+    ui_groups: Vec<ui::UiGroupView>,
+    reference_frame: String,
+    active_topics: Vec<String>,
+    tf_axis_length: f32,
+    view: Option<ros_node::ViewConfig>,
+}
+
+/// Spawn the ROS node from a parsed config (applying CLI overrides) and derive
+/// everything the app shell needs from it. Shared by startup (`resumed`) and
+/// runtime "Load config…" (`AppContext::load_config`) so both paths behave
+/// identically.
+#[cfg(feature = "ros")]
+fn build_ros(
+    scene: Arc<RwLock<SceneGraph>>,
+    mut cfg: ros_node::RosConfig,
+    args: &Args,
+) -> RosBuild {
+    // CLI --ref-frame takes precedence over the config file value.
+    if args.ref_frame != "map" {
+        cfg.reference_frame = args.ref_frame.clone();
+    }
+    // CLI --urdf takes precedence over the config file value.
+    if let Some(p) = args.urdf.as_ref() {
+        cfg.urdf_path = Some(p.clone());
+    }
+    let ui_groups = ui::UiGroupView::from_config(&cfg.ui_groups);
+    let reference_frame = cfg.reference_frame.clone();
+    // Snapshot every concrete topic the node will subscribe to so the
+    // Save-config window can pre-check them. Wildcards ("*") are skipped
+    // since they don't name a real topic.
+    let mut active_topics: Vec<String> = Vec::new();
+    if cfg.map_topic != "*" {
+        active_topics.push(cfg.map_topic.clone());
+    }
+    for v in [
+        &cfg.pose_topics,
+        &cfg.pose_array_topics,
+        &cfg.path_topics,
+        &cfg.scan_topics,
+        &cfg.point_topics,
+        &cfg.marker_topics,
+        &cfg.marker_array_topics,
+    ] {
+        for t in v.iter().filter(|t| t.as_str() != "*") {
+            active_topics.push(t.clone());
+        }
+    }
+    let cfg_tf_axis_length = cfg.tf_axis_length;
+    let view = cfg.view;
+    let ros = match ros_node::RosNode::spawn(scene, cfg) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            log::error!("failed to start ros2 node: {e:#}");
+            None
+        }
+    };
+    // If the config file pinned [tf].axis_length, push it into the shared
+    // atomic so the executor and the UI start in sync.
+    let tf_axis_length = match (cfg_tf_axis_length, ros.as_ref()) {
+        (Some(v), Some(n)) if v > 0.0 => {
+            n.tf_axis_length_handle()
+                .store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            v
+        }
+        (_, Some(n)) => f32::from_bits(
+            n.tf_axis_length_handle()
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ),
+        (_, None) => 0.3,
+    };
+    RosBuild {
+        ros,
+        ui_groups,
+        reference_frame,
+        active_topics,
+        tf_axis_length,
+        view,
     }
 }
 
@@ -229,8 +338,8 @@ impl ApplicationHandler for App {
         };
 
         #[cfg(feature = "ros")]
-        let (ros, ui_groups, reference_frame, active_topics, cfg_tf_axis_length, cfg_view) = {
-            let mut cfg = match self.args.config.as_deref() {
+        let (ros, ui_groups, reference_frame, active_topics, initial_tf_scale, cfg_view) = {
+            let cfg = match self.args.config.as_deref() {
                 Some(p) => match ros_node::RosConfig::from_path(p) {
                     Ok(c) => {
                         log::info!("loaded ros config from {}", p.display());
@@ -243,46 +352,15 @@ impl ApplicationHandler for App {
                 },
                 None => ros_node::RosConfig::default(),
             };
-            // CLI --ref-frame takes precedence over the config file value.
-            if self.args.ref_frame != "map" {
-                cfg.reference_frame = self.args.ref_frame.clone();
-            }
-            // CLI --urdf takes precedence over the config file value.
-            if let Some(p) = self.args.urdf.as_ref() {
-                cfg.urdf_path = Some(p.clone());
-            }
-            let groups = ui::UiGroupView::from_config(&cfg.ui_groups);
-            let reference_frame = cfg.reference_frame.clone();
-            // Snapshot every concrete topic the node will subscribe to so the
-            // Save-config window can pre-check them. Wildcards ("*") are skipped
-            // since they don't name a real topic.
-            let mut active: Vec<String> = Vec::new();
-            if cfg.map_topic != "*" {
-                active.push(cfg.map_topic.clone());
-            }
-            for v in [
-                &cfg.pose_topics,
-                &cfg.pose_array_topics,
-                &cfg.path_topics,
-                &cfg.scan_topics,
-                &cfg.point_topics,
-                &cfg.marker_topics,
-                &cfg.marker_array_topics,
-            ] {
-                for t in v.iter().filter(|t| t.as_str() != "*") {
-                    active.push(t.clone());
-                }
-            }
-            let tf_axis_len = cfg.tf_axis_length;
-            let view = cfg.view;
-            let n = match ros_node::RosNode::spawn(scene.clone(), cfg) {
-                Ok(n) => Some(n),
-                Err(e) => {
-                    log::error!("failed to start ros2 node: {e:#}");
-                    None
-                }
-            };
-            (n, groups, reference_frame, active, tf_axis_len, view)
+            let built = build_ros(scene.clone(), cfg, &self.args);
+            (
+                built.ros,
+                built.ui_groups,
+                built.reference_frame,
+                built.active_topics,
+                built.tf_axis_length,
+                built.view,
+            )
         };
         #[cfg(not(feature = "ros"))]
         let ui_groups: Vec<ui::UiGroupView> = Vec::new();
@@ -290,6 +368,8 @@ impl ApplicationHandler for App {
         let reference_frame: String = self.args.ref_frame.clone();
         #[cfg(not(feature = "ros"))]
         let active_topics: Vec<String> = Vec::new();
+        #[cfg(not(feature = "ros"))]
+        let initial_tf_scale = 0.3;
 
         // Restore a saved camera view (`[view]` in the config), the way RViz
         // reopens a saved framing.
@@ -304,28 +384,6 @@ impl ApplicationHandler for App {
 
         window.request_redraw();
 
-        #[cfg(feature = "ros")]
-        let initial_tf_scale = {
-            // If the config file pinned [tf].axis_length, push it into the
-            // shared atomic so the executor and the UI start in sync.
-            if let (Some(v), Some(n)) = (cfg_tf_axis_length, ros.as_ref()) {
-                if v > 0.0 {
-                    n.tf_axis_length_handle()
-                        .store(v.to_bits(), std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            ros.as_ref()
-                .map(|n| {
-                    f32::from_bits(
-                        n.tf_axis_length_handle()
-                            .load(std::sync::atomic::Ordering::Relaxed),
-                    )
-                })
-                .unwrap_or(0.3)
-        };
-        #[cfg(not(feature = "ros"))]
-        let initial_tf_scale = 0.3;
-
         let discoverer = ui::TopicDiscovererState::default();
 
         self.ctx = Some(AppContext {
@@ -334,6 +392,7 @@ impl ApplicationHandler for App {
             egui,
             scene,
             mock,
+            args: self.args.clone(),
             #[cfg(feature = "ros")]
             ros,
             theme: theme_mode,
@@ -342,11 +401,15 @@ impl ApplicationHandler for App {
             reference_frame,
             discoverer,
             save_config: ui::SaveConfigState::default(),
+            load_config: ui::LoadConfigState::default(),
             publish: ui::PublishState::default(),
             goal: ui::GoalToolState::default(),
+            pose_estimate: ui::PoseEstimateToolState::default(),
             #[cfg(feature = "ros")]
-            goal_drag: None,
+            pose_drag: None,
             edit_state: ui::EntityEditState::default(),
+            selection: ui::SelectionState::default(),
+            edit_popup: ui::EditPopupState::default(),
             active_topics,
             input: InputState::default(),
             show_reference_grid: true,
@@ -393,12 +456,12 @@ impl ApplicationHandler for App {
                 ctx.input.last_cursor = ctx.input.cursor;
                 ctx.input.cursor = p;
                 #[cfg(feature = "ros")]
-                if ctx.goal_drag.is_some() {
+                if ctx.pose_drag.is_some() {
                     if let Some(hit) = ctx.cursor_ground_hit() {
-                        if let Some(d) = ctx.goal_drag.as_mut() {
+                        if let Some((_, d)) = ctx.pose_drag.as_mut() {
                             d.current = hit;
                         }
-                        ctx.update_goal_preview();
+                        ctx.update_pose_preview();
                         ctx.window.request_redraw();
                     }
                     return;
@@ -420,18 +483,23 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
                 #[cfg(feature = "ros")]
-                if button == MouseButton::Left && ctx.goal.armed {
+                if button == MouseButton::Left && (ctx.goal.armed || ctx.pose_estimate.armed) {
                     if pressed && !egui_consumed {
+                        let kind = if ctx.goal.armed {
+                            PoseToolKind::Goal
+                        } else {
+                            PoseToolKind::Estimate
+                        };
                         if let Some(hit) = ctx.cursor_ground_hit() {
-                            ctx.goal_drag = Some(GoalDrag { start: hit, current: hit });
-                            ctx.update_goal_preview();
+                            ctx.pose_drag = Some((kind, PoseDrag { start: hit, current: hit }));
+                            ctx.update_pose_preview();
                         }
-                    } else if !pressed && ctx.goal_drag.is_some() {
+                    } else if !pressed && ctx.pose_drag.is_some() {
                         // Only a press that landed on the ground publishes; a
                         // missed (horizon) press leaves the tool armed to retry.
-                        ctx.publish_goal();
+                        ctx.publish_pose();
                     }
-                    // The goal click must not also orbit the camera.
+                    // The pose-tool click must not also orbit the camera.
                     ctx.input.left_down = false;
                     ctx.window.request_redraw();
                     return;
@@ -505,10 +573,11 @@ impl AppContext {
         self.renderer.camera.ground_ray_hit(ndc, w / h)
     }
 
-    /// Upsert the live preview arrow for the current goal drag.
+    /// Upsert the live preview arrow for the current pose-tool drag. Color
+    /// distinguishes which tool is armed: yellow for Goal, green for Estimate.
     #[cfg(feature = "ros")]
-    fn update_goal_preview(&mut self) {
-        let Some(d) = self.goal_drag else {
+    fn update_pose_preview(&mut self) {
+        let Some((kind, d)) = self.pose_drag else {
             return;
         };
         let delta = d.current - d.start;
@@ -518,25 +587,29 @@ impl AppContext {
         } else {
             glam::Vec3::X
         };
+        let color = match kind {
+            PoseToolKind::Goal => scene::Color::rgb(1.0, 0.85, 0.1),
+            PoseToolKind::Estimate => scene::Color::rgb(0.2, 0.9, 0.3),
+        };
         let arrow = scene::Arrow {
             origin: d.start,
             direction,
             length: len.max(0.3),
             shaft_radius: 0.05,
             head_radius: 0.12,
-            color: scene::Color::rgb(1.0, 0.85, 0.1),
+            color,
         };
         let entity =
             scene::SceneEntity::new(GOAL_PREVIEW_ID, scene::ScenePrimitive::Arrows(vec![arrow]))
-                .with_label("goal preview".to_string());
+                .with_label("pose preview".to_string());
         self.scene.write().upsert(entity);
     }
 
-    /// Build a `PoseStamped` from the finished drag, publish it to the goal
-    /// topic, clear the preview, and disarm the tool.
+    /// Build a pose message from the finished drag, publish it to the armed
+    /// tool's topic, clear the preview, and disarm both tools.
     #[cfg(feature = "ros")]
-    fn publish_goal(&mut self) {
-        if let Some(d) = self.goal_drag.take() {
+    fn publish_pose(&mut self) {
+        if let Some((kind, d)) = self.pose_drag.take() {
             // World ground point → ROS position: (x, -z, 0).
             let px = d.start.x as f64;
             let py = -d.start.z as f64;
@@ -550,31 +623,107 @@ impl AppContext {
             };
             let qz = (yaw * 0.5).sin();
             let qw = (yaw * 0.5).cos();
-            let json = serde_json::json!({
-                "header": { "frame_id": self.reference_frame },
-                "pose": {
-                    "position": { "x": px, "y": py, "z": 0.0 },
-                    "orientation": { "x": 0.0, "y": 0.0, "z": qz, "w": qw }
+
+            let (topic, type_name, json) = match kind {
+                PoseToolKind::Goal => {
+                    let json = serde_json::json!({
+                        "header": { "frame_id": self.reference_frame },
+                        "pose": {
+                            "position": { "x": px, "y": py, "z": 0.0 },
+                            "orientation": { "x": 0.0, "y": 0.0, "z": qz, "w": qw }
+                        }
+                    })
+                    .to_string();
+                    (
+                        self.goal.topic.trim().to_string(),
+                        "geometry_msgs/msg/PoseStamped".to_string(),
+                        json,
+                    )
                 }
-            })
-            .to_string();
+                PoseToolKind::Estimate => {
+                    // RViz's default initial-pose covariance.
+                    let mut cov = [0.0f64; 36];
+                    cov[0] = 0.25;
+                    cov[7] = 0.25;
+                    cov[35] = 0.06853891945200942;
+                    let json = serde_json::json!({
+                        "header": { "frame_id": self.reference_frame },
+                        "pose": {
+                            "pose": {
+                                "position": { "x": px, "y": py, "z": 0.0 },
+                                "orientation": { "x": 0.0, "y": 0.0, "z": qz, "w": qw }
+                            },
+                            "covariance": cov.to_vec()
+                        }
+                    })
+                    .to_string();
+                    (
+                        self.pose_estimate.topic.trim().to_string(),
+                        "geometry_msgs/msg/PoseWithCovarianceStamped".to_string(),
+                        json,
+                    )
+                }
+            };
+
             if let Some(n) = self.ros.as_ref() {
                 n.publish(ros_node::PublishRequest {
-                    topic: self.goal.topic.trim().to_string(),
-                    type_name: "geometry_msgs/msg/PoseStamped".to_string(),
+                    topic: topic.clone(),
+                    type_name,
                     json,
                 });
-                log::info!(
-                    "goal published to {} ({}, {}) yaw={:.3}",
-                    self.goal.topic.trim(),
-                    px,
-                    py,
-                    yaw
-                );
+                log::info!("pose published to {topic} ({px}, {py}) yaw={yaw:.3}");
             }
             self.scene.write().remove(GOAL_PREVIEW_ID);
         }
         self.goal.armed = false;
+        self.pose_estimate.armed = false;
+    }
+
+    /// Parse `path` and rebuild the ROS-backed half of the session from it —
+    /// new scene graph, new `RosNode`, restored camera/TF-length/UI-groups.
+    /// Mirrors what `resumed()` does at startup via `build_ros`. Returns a
+    /// one-line status message for the Load-config window.
+    #[cfg(feature = "ros")]
+    fn load_config(&mut self, path: &std::path::Path) -> String {
+        let cfg = match ros_node::RosConfig::from_path(path) {
+            Ok(c) => c,
+            Err(e) => return format!("failed to load {}: {e:#}", path.display()),
+        };
+        if let Some(n) = self.ros.take() {
+            n.shutdown();
+        }
+        self.scene = Arc::new(RwLock::new(SceneGraph::new(cfg.reference_frame.clone())));
+        let built = build_ros(self.scene.clone(), cfg, &self.args);
+        let topic_count = built.active_topics.len();
+        self.ui_groups = built.ui_groups;
+        self.reference_frame = built.reference_frame;
+        self.active_topics = built.active_topics;
+        self.tf_axis_length = built.tf_axis_length;
+        self.ros = built.ros;
+        if let Some(v) = built.view {
+            let cam = &mut self.renderer.camera;
+            cam.target = glam::Vec3::from_array(v.target);
+            cam.yaw = v.yaw;
+            cam.pitch = v.pitch;
+            cam.distance = v.distance;
+        }
+        // Stale references into the old scene graph.
+        self.selection = ui::SelectionState::default();
+        self.edit_popup = ui::EditPopupState::default();
+        self.edit_state = ui::EntityEditState::default();
+        self.follow_frame = None;
+        self.pose_drag = None;
+        self.goal.armed = false;
+        self.pose_estimate.armed = false;
+        self.window.request_redraw();
+        if self.ros.is_none() {
+            format!(
+                "loaded {} but failed to start the ros2 node — see log",
+                path.display()
+            )
+        } else {
+            format!("loaded {} ({topic_count} topics)", path.display())
+        }
     }
 
     fn draw(&mut self) {
@@ -637,6 +786,9 @@ impl AppContext {
         let mut remove_requests: Vec<String> = Vec::new();
         #[cfg(feature = "ros")]
         let mut publish_requests: Vec<ros_node::PublishRequest> = Vec::new();
+        // Runtime "Load config…" request collected this frame, if any.
+        #[cfg(feature = "ros")]
+        let mut load_request: Option<std::path::PathBuf> = None;
         let full_output = {
             let window = self.window.clone();
             let scene = self.scene.clone();
@@ -646,7 +798,10 @@ impl AppContext {
             let tf_len = &mut self.tf_axis_length;
             let discoverer = &mut self.discoverer;
             let save_config = &mut self.save_config;
+            let load_config = &mut self.load_config;
             let edit_state = &mut self.edit_state;
+            let selection = &mut self.selection;
+            let edit_popup = &mut self.edit_popup;
             let follow = &mut self.follow_frame;
             let theme_mode = &mut self.theme;
             let remove_requests = &mut remove_requests;
@@ -657,7 +812,11 @@ impl AppContext {
             #[cfg(feature = "ros")]
             let goal_state = &mut self.goal;
             #[cfg(feature = "ros")]
+            let pose_estimate_state = &mut self.pose_estimate;
+            #[cfg(feature = "ros")]
             let publish_requests = &mut publish_requests;
+            #[cfg(feature = "ros")]
+            let load_request = &mut load_request;
             self.egui.run_ui(&window, |egui_ctx| {
                 let before = *theme_mode;
                 let mut scene = scene.write();
@@ -672,7 +831,10 @@ impl AppContext {
                     tf_len,
                     discoverer,
                     save_config,
+                    load_config,
                     edit_state,
+                    selection,
+                    edit_popup,
                     follow,
                     theme_mode,
                     remove_requests,
@@ -685,7 +847,11 @@ impl AppContext {
                     #[cfg(feature = "ros")]
                     goal_state,
                     #[cfg(feature = "ros")]
+                    pose_estimate_state,
+                    #[cfg(feature = "ros")]
                     publish_requests,
+                    #[cfg(feature = "ros")]
+                    load_request,
                 );
                 if *theme_mode != before {
                     theme::apply(egui_ctx, *theme_mode);
@@ -723,6 +889,13 @@ impl AppContext {
         }
         #[cfg(not(feature = "ros"))]
         let _ = &remove_requests;
+
+        // Runtime "Load config…": rebuild the ROS-backed half of the session.
+        #[cfg(feature = "ros")]
+        if let Some(path) = load_request.take() {
+            let status = self.load_config(&path);
+            self.load_config.status = Some(status);
+        }
 
         // Forward one-shot publishes, then drive optional rate publishing.
         #[cfg(feature = "ros")]

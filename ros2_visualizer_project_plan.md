@@ -1,7 +1,7 @@
 # ROS2 Visualizer — Project Plan
 *A ROS2-native, GPU-accelerated visualization tool built in Rust*
 
-*Plan version 2.1 — June 2026.* Folds the prior
+*Plan version 2.2 — July 2026.* Folds the prior
 `ros2_visualizer_milestone0_detailed.md` and the `MBABYSTEPS_1.md` execution log
 into this single document. Milestones 0 and 0.5 are complete. PointCloud2,
 Marker/MarkerArray, and Costmap2D were pulled forward from later milestones into
@@ -34,7 +34,7 @@ Working name: **`fastviz`**. To be revisited at community launch.
 |---|---|---|
 | Language | Rust | Performance, safety, wgpu ecosystem |
 | Rendering | wgpu 22 + naga | GPU-native, cross-backend (Vulkan primary on Linux) |
-| UI framework | egui 0.28 | Immediate-mode, embeds cleanly with wgpu, used by Rerun |
+| UI framework | egui 0.29 | Immediate-mode, embeds cleanly with wgpu, used by Rerun |
 | Windowing | winit 0.30 | ApplicationHandler model, X11 + Wayland |
 | ROS2 bindings | **r2r 0.9** (only) | Pure-cargo build flow, mature for sub/pub. `rclrs` is deferred until dynamic-message needs appear. |
 | Message types | r2r generates from `AMENT_PREFIX_PATH` at build time | No `ros_idl` codegen step in our tree |
@@ -122,7 +122,7 @@ historical reference and onboarding.
 ### 0.1 — Cargo workspace skeleton ✅
 
 - Workspace crates: `app`, `renderer`, `scene`, `mock_injector` (and now `ros_node` from M0.5).
-- Pinned versions: `wgpu = "22"`, `winit = "0.30"`, `egui = "0.28"`, `egui-wgpu = "0.28"`, `glam`, `bytemuck`, `crossbeam-channel`.
+- Pinned versions: `wgpu = "22"`, `winit = "0.30"`, `egui = "0.29"`, `egui-wgpu = "0.29"`, `glam`, `bytemuck`, `crossbeam-channel`.
 - `clippy`, `rustfmt`, `.github/workflows/ci.yml` in place.
 - Top-level `Dockerfile` (release image) + `.devcontainer/` (M0.5+ workflow).
 
@@ -194,9 +194,9 @@ Camera bind group is shared across all 3D pipelines (group 0).
 
 ### 0.5 — Render passes ✅
 
-Per-frame pass order:
+Per-frame pass order (see `Renderer::render`):
 ```
-reference_grid → mesh → occupancy → line → arrow → point → egui
+occupancy → mesh → reference_grid → line → arrow → point → egui
 ```
 
 All 3D passes share the camera bind group:
@@ -554,6 +554,8 @@ directory, then shows the fully-resolved save path.
   framing.
 - The save writes to `std::env::current_dir()`, canonicalizes the result, and
   reports `Saved to <abs path>`.
+- Extended post-v2.2 with per-topic style persistence and a runtime **Load
+  config…** button — see "Post-v2.2 additions" below.
 
 ### 0.5.18 — TF interpolation ✅
 
@@ -570,6 +572,67 @@ ascending stamp, decomposed into `Quat`/`Vec3`).
   snapping to the newest TF.
 - Unit tests cover translation midpoint, range clamping, rotation slerp,
   history bounding, and out-of-order insertion.
+
+### Post-v2.1 additions ✅
+
+Shipped after Plan v2.1 without prior plan coverage; recorded here after the
+fact so the document doesn't drift further from the repo.
+
+- Instanced arrow pass (`crates/renderer/src/passes/arrow.rs`) + MSAA
+  anti-aliasing on the 3D surface.
+- Per-entity `StyleOverride` (color / scale / head-radius), applied on top of
+  the live primitive and surviving republish (`SceneGraph::set_color_override`,
+  `set_scale_override`, `set_head_scale_override`).
+- Publish window: pick a topic + type (or type them manually), edit an
+  untyped JSON body, publish once or at a fixed rate
+  (`ros_node::create_publisher_untyped`).
+- Goal-pose tool: click-drag on the ground to set position + heading,
+  publishes `geometry_msgs/msg/PoseStamped`.
+- Pose-estimate tool: same drag machinery, publishes
+  `geometry_msgs/msg/PoseWithCovarianceStamped` on `/initialpose` for AMCL /
+  slam_toolbox.
+- Topic removal (✕ button / `request_remove_topic`) — supersedes the 0.5.7
+  "teardown deferred" note; removing a topic stops its subscription and purges
+  its entities.
+- Follow-frame camera: pins the camera target to a chosen TF frame's live
+  world position.
+- Light / dark theme toggle.
+- `[[ui.group]]` side-panel groups (config-driven topic/URDF/TF bucketing).
+- Panel reshuffle: top bar holds brand + Publish/Goal/Pose-Est controls; a new
+  bottom `viewbar` holds Reset/Top/Side/Grid/Follow plus the theme toggle, FPS,
+  and PC2 readouts; the left panel's `Add` / `Save config…` buttons moved above
+  the entity tree.
+- Single-selection model (`SelectionState`) + a shared floating "Edit
+  size/shape…" popup (`EditPopupState`), opened via right-click context menu
+  on an entity row or the Edit button pinned at the bottom of the entity
+  panel — replaces the old per-row `CollapsingHeader` style editor.
+- Single-entity topics render as a flat row (no `"topic (1)"` expander).
+
+### Post-v2.2 additions ✅
+
+Shipped after Plan v2.2 without prior plan coverage; recorded here after the
+fact so the document doesn't drift further from the repo.
+
+- Per-topic style overrides for poses, pose_arrays, paths, scans and points
+  (`[poses.style."<topic>"]`, `[pose_arrays.style."<topic>"]`,
+  `[paths.style."<topic>"]`, `[scans.style."<topic>"]`,
+  `[points.style."<topic>"]`) — a single topic within a multi-topic category
+  can now have its own color/size, overriding the category default
+  (`RosConfig::{arrow,path,scan,point}_style_for`). For paths/scans/points the
+  per-topic map and the flat category `style = {...}` share the same TOML key,
+  so a config uses one form or the other per category, never both — enforced
+  by an untagged `RawStyleField<T>` enum on parse.
+- **Save config…** now emits a per-topic `style` block for every topic in a
+  category once that category has more than one topic (baking in each
+  entity's live color/scale/head-radius/shaft-radius); single-topic categories
+  keep the old bare `style = {...}` line.
+- Runtime **Load config…** button (symmetric with Save): parses a `.toml`
+  file and rebuilds the ROS-backed half of the session from it — new scene
+  graph, new `RosNode`, restored camera/TF-length/UI-groups — the same
+  construction path `resumed()` runs at startup (shared via `build_ros` in
+  `main.rs`). This is a full rebuild, not a live per-topic diff: TF history,
+  URDF-from-topic state, and live markers are dropped and resubscribed, same
+  as a restart.
 
 ---
 
@@ -621,7 +684,7 @@ list panel is meaningful. Visibility toggles route through
 - [x] `visualization_msgs/Marker` + `MarkerArray` — done in M0.5 (0.5.13).
 - [x] Costmap2D overlay (separate `OccupancyGrid` layer with cost colormap) — done in M0.5 (0.5.15).
 - [ ] `MESH_RESOURCE` marker geometry (deferred from 0.5.13).
-- [ ] Topic discovery UI: browse and subscribe to any topic from within the app.
+- [x] Topic discovery UI: browse and subscribe to any topic from within the app — done in M0.5 (0.5.16).
 
 **Deliverable:** full sensor suite visible; remaining gap is camera/image display.
 
@@ -746,7 +809,7 @@ Future crates (per-milestone): `plugin_api/`, `builtin_plugins/`, `mcap_io/`.
 
 ---
 
-*Plan v2.1 — June 2026.*
+*Plan v2.3 — July 2026.*
 *Single source of truth: combines the original project plan (vision,
 architecture, milestone overview), `ros2_visualizer_milestone0_detailed.md`
 (M0 / M0.5 sub-task detail), and the former `MBABYSTEPS_1.md` execution log

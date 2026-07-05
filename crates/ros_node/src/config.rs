@@ -36,15 +36,26 @@ pub struct RosConfig {
     /// Topics carrying `geometry_msgs/PoseArray`. Each gets one entity holding many Arrows.
     pub pose_array_topics: Vec<String>,
     pub arrow: ArrowStyle,
+    /// Per-topic arrow style overrides for `pose_topics`, keyed by topic.
+    /// Topics not present here fall back to `arrow`.
+    pub pose_topic_style: HashMap<String, ArrowStyle>,
+    /// Per-topic arrow style overrides for `pose_array_topics`.
+    pub pose_array_topic_style: HashMap<String, ArrowStyle>,
     /// Topics carrying `nav_msgs/Path`. Each gets one Polyline entity.
     pub path_topics: Vec<String>,
     pub path_style: PathStyle,
+    /// Per-topic path style overrides, keyed by topic.
+    pub path_topic_style: HashMap<String, PathStyle>,
     /// Topics carrying `sensor_msgs/LaserScan`. Each gets one Points entity.
     pub scan_topics: Vec<String>,
     pub scan_style: ScanStyle,
+    /// Per-topic scan style overrides, keyed by topic.
+    pub scan_topic_style: HashMap<String, ScanStyle>,
     /// Topics carrying `sensor_msgs/PointCloud2`. Each gets one Points entity.
     pub point_topics: Vec<String>,
     pub point_style: PointCloudStyle,
+    /// Per-topic point-cloud style overrides, keyed by topic.
+    pub point_topic_style: HashMap<String, PointCloudStyle>,
     /// Topics carrying `visualization_msgs/Marker`.
     pub marker_topics: Vec<String>,
     /// Topics carrying `visualization_msgs/MarkerArray`.
@@ -162,7 +173,7 @@ impl QosOverride {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScanStyle {
     pub size: f32,
     pub color: scene::Color,
@@ -177,7 +188,7 @@ impl Default for ScanStyle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PointCloudStyle {
     pub size: f32,
     pub color: scene::Color,
@@ -195,7 +206,7 @@ impl Default for PointCloudStyle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PathStyle {
     pub width: f32,
     pub color: scene::Color,
@@ -213,7 +224,7 @@ impl Default for PathStyle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ArrowStyle {
     pub length: f32,
     pub shaft_radius: f32,
@@ -244,12 +255,17 @@ impl Default for RosConfig {
             pose_topics: vec!["/goal_pose".into()],
             pose_array_topics: vec!["/particle_cloud".into()],
             arrow: ArrowStyle::default(),
+            pose_topic_style: HashMap::new(),
+            pose_array_topic_style: HashMap::new(),
             path_topics: vec!["/plan".into()],
             path_style: PathStyle::default(),
+            path_topic_style: HashMap::new(),
             scan_topics: vec!["/scan".into()],
             scan_style: ScanStyle::default(),
+            scan_topic_style: HashMap::new(),
             point_topics: Vec::new(),
             point_style: PointCloudStyle::default(),
+            point_topic_style: HashMap::new(),
             marker_topics: Vec::new(),
             marker_array_topics: Vec::new(),
             urdf_path: None,
@@ -284,6 +300,40 @@ impl RosConfig {
             .with_context(|| format!("parsing TOML config {}", p.display()))?;
         Ok(raw.into_runtime())
     }
+
+    /// Per-topic arrow style, falling back to the category default `arrow`.
+    pub fn arrow_style_for(&self, topic: &str, is_array: bool) -> ArrowStyle {
+        let map = if is_array {
+            &self.pose_array_topic_style
+        } else {
+            &self.pose_topic_style
+        };
+        map.get(topic).cloned().unwrap_or_else(|| self.arrow.clone())
+    }
+
+    /// Per-topic path style, falling back to the category default `path_style`.
+    pub fn path_style_for(&self, topic: &str) -> PathStyle {
+        self.path_topic_style
+            .get(topic)
+            .cloned()
+            .unwrap_or_else(|| self.path_style.clone())
+    }
+
+    /// Per-topic scan style, falling back to the category default `scan_style`.
+    pub fn scan_style_for(&self, topic: &str) -> ScanStyle {
+        self.scan_topic_style
+            .get(topic)
+            .cloned()
+            .unwrap_or_else(|| self.scan_style.clone())
+    }
+
+    /// Per-topic point-cloud style, falling back to the category default `point_style`.
+    pub fn point_style_for(&self, topic: &str) -> PointCloudStyle {
+        self.point_topic_style
+            .get(topic)
+            .cloned()
+            .unwrap_or_else(|| self.point_style.clone())
+    }
 }
 
 // ---------- TOML schema ----------
@@ -300,8 +350,8 @@ pub struct RawConfig {
     pub reference_frame: Option<String>,
     pub map: Option<RawMap>,
     pub costmaps: Option<RawTopics>,
-    pub poses: Option<RawTopics>,
-    pub pose_arrays: Option<RawTopics>,
+    pub poses: Option<RawPoses>,
+    pub pose_arrays: Option<RawPoseArrays>,
     pub arrow: Option<RawArrow>,
     pub paths: Option<RawPaths>,
     pub scans: Option<RawScans>,
@@ -391,6 +441,24 @@ pub struct RawTopics {
     pub qos: HashMap<String, QosOverride>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawPoses {
+    pub topics: Vec<String>,
+    pub qos: HashMap<String, QosOverride>,
+    /// Per-topic arrow style, overriding `[arrow]` for just this topic.
+    pub style: HashMap<String, RawArrow>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RawPoseArrays {
+    pub topics: Vec<String>,
+    pub qos: HashMap<String, QosOverride>,
+    /// Per-topic arrow style, overriding `[arrow]` for just this topic.
+    pub style: HashMap<String, RawArrow>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawArrow {
@@ -404,7 +472,10 @@ pub struct RawArrow {
 #[serde(default, deny_unknown_fields)]
 pub struct RawPaths {
     pub topics: Vec<String>,
-    pub style: Option<RawPathStyle>,
+    /// Either the flat category default (`style = { width = ..., color = ... }`)
+    /// or a per-topic map (`[paths.style."<topic>"]`) — never both in the same
+    /// file, since they share the `style` TOML key.
+    pub style: Option<RawStyleField<RawPathStyle>>,
     pub qos: HashMap<String, QosOverride>,
 }
 
@@ -419,7 +490,7 @@ pub struct RawPathStyle {
 #[serde(default, deny_unknown_fields)]
 pub struct RawScans {
     pub topics: Vec<String>,
-    pub style: Option<RawScanStyle>,
+    pub style: Option<RawStyleField<RawScanStyle>>,
     pub qos: HashMap<String, QosOverride>,
 }
 
@@ -434,8 +505,19 @@ pub struct RawScanStyle {
 #[serde(default, deny_unknown_fields)]
 pub struct RawPoints {
     pub topics: Vec<String>,
-    pub style: Option<RawPointStyle>,
+    pub style: Option<RawStyleField<RawPointStyle>>,
     pub qos: HashMap<String, QosOverride>,
+}
+
+/// A `style` key that is either a single flat style table (the category
+/// default) or a map from topic name to per-topic style tables. Both forms
+/// use the same TOML key (`style`), so they can't coexist in one file — which
+/// form is present is auto-detected on parse.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RawStyleField<T> {
+    Single(T),
+    PerTopic(HashMap<String, T>),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -481,62 +563,127 @@ impl RawConfig {
             Some(c) => (c.topics, c.qos),
             None => (d.costmap_topics, d.costmap_qos),
         };
-        let (pose_topics, pose_qos) = match poses {
-            Some(p) => (p.topics, p.qos),
-            None => (d.pose_topics, d.pose_qos),
-        };
-        let (pose_array_topics, pose_array_qos) = match pose_arrays {
-            Some(p) => (p.topics, p.qos),
-            None => (d.pose_array_topics, d.pose_array_qos),
-        };
-        let arrow_style = arrow
-            .map(|a| ArrowStyle {
+        fn arrow_from_raw(a: RawArrow) -> ArrowStyle {
+            ArrowStyle {
                 length: a.length,
                 shaft_radius: a.shaft_radius,
                 head_radius: a.head_radius,
                 color: rgb_to_color(a.color),
-            })
-            .unwrap_or(d.arrow);
-        let (path_topics, path_style, path_qos) = match paths {
+            }
+        }
+        let (pose_topics, pose_qos, pose_topic_style) = match poses {
             Some(p) => (
                 p.topics,
-                p.style
-                    .map(|s| PathStyle {
-                        width: s.width,
-                        color: rgb_to_color(s.color),
-                    })
-                    .unwrap_or(d.path_style),
                 p.qos,
+                p.style
+                    .into_iter()
+                    .map(|(k, v)| (k, arrow_from_raw(v)))
+                    .collect(),
             ),
-            None => (d.path_topics, d.path_style, d.path_qos),
+            None => (d.pose_topics, d.pose_qos, d.pose_topic_style),
         };
-        let (scan_topics, scan_style, scan_qos) = match scans {
-            Some(s) => (
-                s.topics,
-                s.style
-                    .map(|s| ScanStyle {
-                        size: s.size,
-                        color: rgb_to_color(s.color),
-                    })
-                    .unwrap_or(d.scan_style),
-                s.qos,
+        let (pose_array_topics, pose_array_qos, pose_array_topic_style) = match pose_arrays {
+            Some(p) => (
+                p.topics,
+                p.qos,
+                p.style
+                    .into_iter()
+                    .map(|(k, v)| (k, arrow_from_raw(v)))
+                    .collect(),
             ),
-            None => (d.scan_topics, d.scan_style, d.scan_qos),
+            None => (
+                d.pose_array_topics,
+                d.pose_array_qos,
+                d.pose_array_topic_style,
+            ),
         };
-        let (point_topics, point_style, point_qos) = match points {
+        let arrow_style = arrow.map(arrow_from_raw).unwrap_or(d.arrow);
+        let (path_topics, path_style, path_topic_style, path_qos) = match paths {
+            Some(p) => {
+                let (style, topic_style) = match p.style {
+                    Some(RawStyleField::Single(s)) => (
+                        PathStyle {
+                            width: s.width,
+                            color: rgb_to_color(s.color),
+                        },
+                        HashMap::new(),
+                    ),
+                    Some(RawStyleField::PerTopic(map)) => (
+                        d.path_style,
+                        map.into_iter()
+                            .map(|(k, s)| {
+                                (
+                                    k,
+                                    PathStyle {
+                                        width: s.width,
+                                        color: rgb_to_color(s.color),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    ),
+                    None => (d.path_style, HashMap::new()),
+                };
+                (p.topics, style, topic_style, p.qos)
+            }
+            None => (d.path_topics, d.path_style, d.path_topic_style, d.path_qos),
+        };
+        let (scan_topics, scan_style, scan_topic_style, scan_qos) = match scans {
+            Some(s) => {
+                let (style, topic_style) = match s.style {
+                    Some(RawStyleField::Single(s)) => (
+                        ScanStyle {
+                            size: s.size,
+                            color: rgb_to_color(s.color),
+                        },
+                        HashMap::new(),
+                    ),
+                    Some(RawStyleField::PerTopic(map)) => (
+                        d.scan_style,
+                        map.into_iter()
+                            .map(|(k, s)| {
+                                (
+                                    k,
+                                    ScanStyle {
+                                        size: s.size,
+                                        color: rgb_to_color(s.color),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    ),
+                    None => (d.scan_style, HashMap::new()),
+                };
+                (s.topics, style, topic_style, s.qos)
+            }
+            None => (d.scan_topics, d.scan_style, d.scan_topic_style, d.scan_qos),
+        };
+        let (point_topics, point_style, point_topic_style, point_qos) = match points {
             Some(p) => {
                 let dp = d.point_style;
-                let style = p
-                    .style
-                    .map(|s| PointCloudStyle {
-                        size: s.size.unwrap_or(dp.size),
-                        color: s.color.map(rgb_to_color).unwrap_or(dp.color),
-                        stride: s.stride.unwrap_or(dp.stride),
-                    })
-                    .unwrap_or(dp);
-                (p.topics, style, p.qos)
+                let point_from_raw = |s: RawPointStyle, base: &PointCloudStyle| PointCloudStyle {
+                    size: s.size.unwrap_or(base.size),
+                    color: s.color.map(rgb_to_color).unwrap_or(base.color),
+                    stride: s.stride.unwrap_or(base.stride),
+                };
+                let (style, topic_style) = match p.style {
+                    Some(RawStyleField::Single(s)) => (point_from_raw(s, &dp), HashMap::new()),
+                    Some(RawStyleField::PerTopic(map)) => (
+                        dp.clone(),
+                        map.into_iter()
+                            .map(|(k, s)| (k, point_from_raw(s, &dp)))
+                            .collect(),
+                    ),
+                    None => (dp, HashMap::new()),
+                };
+                (p.topics, style, topic_style, p.qos)
             }
-            None => (d.point_topics, d.point_style, d.point_qos),
+            None => (
+                d.point_topics,
+                d.point_style,
+                d.point_topic_style,
+                d.point_qos,
+            ),
         };
         let (marker_topics, marker_qos) = match markers {
             Some(m) => (m.topics, m.qos),
@@ -614,12 +761,17 @@ impl RawConfig {
             pose_topics,
             pose_array_topics,
             arrow: arrow_style,
+            pose_topic_style,
+            pose_array_topic_style,
             path_topics,
             path_style,
+            path_topic_style,
             scan_topics,
             scan_style,
+            scan_topic_style,
             point_topics,
             point_style,
+            point_topic_style,
             marker_topics,
             marker_array_topics,
             urdf_path,
@@ -895,5 +1047,111 @@ mod tests {
         assert_eq!(p.reliability, r2r::qos::ReliabilityPolicy::BestEffort);
         assert_eq!(p.durability, r2r::qos::DurabilityPolicy::TransientLocal);
         assert_eq!(p.depth, 7);
+    }
+
+    #[test]
+    fn pose_per_topic_style_parses_and_falls_back() {
+        let toml = r#"
+            [poses]
+            topics = ["/goal_pose", "/other_pose"]
+
+            [poses.style."/goal_pose"]
+            length = 0.9
+            shaft_radius = 0.05
+            head_radius = 0.12
+            color = [1.0, 0.0, 0.0]
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        let styled = cfg.arrow_style_for("/goal_pose", false);
+        assert!((styled.length - 0.9).abs() < 1e-6);
+        assert_eq!(styled.color, scene::Color::rgb(1.0, 0.0, 0.0));
+        // Un-styled topic falls back to the category default.
+        assert_eq!(cfg.arrow_style_for("/other_pose", false), cfg.arrow);
+    }
+
+    #[test]
+    fn pose_array_per_topic_style_parses() {
+        let toml = r#"
+            [pose_arrays]
+            topics = ["/particle_cloud"]
+
+            [pose_arrays.style."/particle_cloud"]
+            length = 0.3
+            shaft_radius = 0.01
+            head_radius = 0.03
+            color = [0.0, 1.0, 0.0]
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        let styled = cfg.arrow_style_for("/particle_cloud", true);
+        assert!((styled.length - 0.3).abs() < 1e-6);
+        assert_eq!(styled.color, scene::Color::rgb(0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn path_per_topic_style_round_trips_and_falls_back() {
+        let toml = r#"
+            [paths]
+            topics = ["/plan", "/global_plan"]
+
+            [paths.style."/plan"]
+            width = 3.0
+            color = [0.0, 1.0, 0.0]
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        let styled = cfg.path_style_for("/plan");
+        assert!((styled.width - 3.0).abs() < 1e-6);
+        assert_eq!(styled.color, scene::Color::rgb(0.0, 1.0, 0.0));
+        assert_eq!(cfg.path_style_for("/global_plan"), cfg.path_style);
+    }
+
+    #[test]
+    fn path_single_style_still_parses() {
+        let toml = r#"
+            [paths]
+            topics = ["/plan"]
+            style = { width = 3.0, color = [0.0, 1.0, 0.0] }
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        assert!((cfg.path_style.width - 3.0).abs() < 1e-6);
+        assert_eq!(cfg.path_style.color, scene::Color::rgb(0.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn scan_per_topic_style_round_trips() {
+        let toml = r#"
+            [scans]
+            topics = ["/scan"]
+
+            [scans.style."/scan"]
+            size = 6.0
+            color = [1.0, 1.0, 0.0]
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        let styled = cfg.scan_style_for("/scan");
+        assert!((styled.size - 6.0).abs() < 1e-6);
+        assert_eq!(styled.color, scene::Color::rgb(1.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn point_per_topic_style_partial_fields_fall_back() {
+        let toml = r#"
+            [points]
+            topics = ["/points2/decompressed", "/points2/other"]
+
+            [points.style."/points2/decompressed"]
+            stride = 4
+        "#;
+        let raw: RawConfig = toml::from_str(toml).unwrap();
+        let cfg = raw.into_runtime();
+        let styled = cfg.point_style_for("/points2/decompressed");
+        let d = RosConfig::default();
+        assert_eq!(styled.stride, 4);
+        assert!((styled.size - d.point_style.size).abs() < 1e-6);
+        assert_eq!(cfg.point_style_for("/points2/other"), cfg.point_style);
     }
 }

@@ -275,6 +275,14 @@ pub fn primitive_head_radius(p: &ScenePrimitive) -> Option<f32> {
     }
 }
 
+/// Read the arrow shaft radius from a primitive, if it is an Arrows primitive.
+pub fn primitive_shaft_radius(p: &ScenePrimitive) -> Option<f32> {
+    match p {
+        ScenePrimitive::Arrows(arrs) => arrs.first().map(|a| a.shaft_radius),
+        _ => None,
+    }
+}
+
 /// Apply a single RGB color to every part of `p` that has one. No-op for
 /// primitives without a single canonical color (Frame, Grid::Cells).
 pub fn apply_color(p: &mut ScenePrimitive, c: Color) {

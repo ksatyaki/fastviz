@@ -1,6 +1,7 @@
 x-fastviz-common: &fastviz-common
   user: dev
-  network_mode: host
+  networks:
+    - ros
   ipc: host
   environment:
     DISPLAY: ${DISPLAY:-}
@@ -65,3 +66,8 @@ services:
         USER_UID: "1000"
         USER_GID: "1000"
         ROS_DISTRO: humble
+
+networks:
+  ros:
+    name: ros_network
+    external: true

@@ -144,25 +144,29 @@ impl MeshPass {
         }
 
         let mut seen: HashSet<EntityId> = HashSet::new();
+        let mut referenced: HashSet<u64> = HashSet::new();
 
         for entity in scene.entities.values() {
             let ScenePrimitive::Mesh(mesh) = &entity.primitive else { continue };
             seen.insert(entity.id);
-            
+
             let mut current_hash = *self.entity_to_hash.get(&entity.id).unwrap_or(&0);
             let last_rev = *self.entity_revisions.get(&entity.id).unwrap_or(&0);
-            
+
             if last_rev != entity.revision || !self.geometries.contains_key(&current_hash) {
                 current_hash = mesh.geometry_hash();
                 self.entity_to_hash.insert(entity.id, current_hash);
                 self.entity_revisions.insert(entity.id, entity.revision);
-                
-                if !self.geometries.contains_key(&current_hash) {
-                    let mut geo = create_shared_geometry(gpu, &mesh);
-                    self.geometries.insert(current_hash, geo);
-                }
+
+                self.geometries
+                    .entry(current_hash)
+                    .or_insert_with(|| create_shared_geometry(gpu, mesh));
             }
-            
+
+            // Kept alive even if hidden, so toggling visibility doesn't force
+            // a re-upload of the geometry on the next revision bump.
+            referenced.insert(current_hash);
+
             if !entity.visible {
                 continue;
             }
@@ -176,9 +180,12 @@ impl MeshPass {
 
         self.entity_to_hash.retain(|id, _| seen.contains(id));
         self.entity_revisions.retain(|id, _| seen.contains(id));
-        
-        // Remove unused geometries
-        self.geometries.retain(|_, geo| !geo.instances.is_empty());
+
+        // Remove geometries no longer referenced by any seen entity (visible
+        // or hidden) — NOT geometries with zero current instances, since a
+        // hidden entity legitimately has zero instances but must keep its
+        // GPU buffers.
+        self.geometries.retain(|h, _| referenced.contains(h));
 
         for geo in self.geometries.values_mut() {
             if geo.instances.is_empty() {
