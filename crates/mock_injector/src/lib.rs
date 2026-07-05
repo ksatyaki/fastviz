@@ -133,6 +133,7 @@ impl MockInjector {
                     color: Color::rgb(0.30, 0.85, 0.55),
                     // World-space thickness in meters (instanced-quad line pass).
                     width: 0.03,
+                    strip: true,
                 }),
             )
             .with_label("figure_eight"),

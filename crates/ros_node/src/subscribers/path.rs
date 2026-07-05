@@ -91,6 +91,7 @@ pub fn spawn_topic(
                     points,
                     color: style.color,
                     width: style.width,
+                    strip: true,
                 };
                 let entity = SceneEntity::new(id, ScenePrimitive::Polyline(polyline))
                     .with_label(topic.clone());

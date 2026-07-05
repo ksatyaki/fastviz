@@ -9,8 +9,8 @@
 //! `/tf` arrivals retroactively fix its world pose.
 //!
 //! Supported marker types (REP-105 / visualization_msgs::msg::Marker):
-//! `ARROW`, `CUBE`, `SPHERE`, `CYLINDER`, `LINE_STRIP`, `CUBE_LIST`,
-//! `SPHERE_LIST`, `POINTS`, `TEXT_VIEW_FACING`, `TRIANGLE_LIST`. `LINE_LIST`,
+//! `ARROW`, `CUBE`, `SPHERE`, `CYLINDER`, `LINE_STRIP`, `LINE_LIST`,
+//! `CUBE_LIST`, `SPHERE_LIST`, `POINTS`, `TEXT_VIEW_FACING`, `TRIANGLE_LIST`.
 //! `ARROW_STRIP`, `MESH_RESOURCE` log a one-time warning per topic.
 
 use std::collections::HashMap;
@@ -430,6 +430,25 @@ fn build_primitive_locked(m: &Marker, topic: &str, state: &mut TopicState) -> Op
                 points: pts,
                 color,
                 width: sx.max(0.005),
+                strip: true,
+            }))
+        }
+        T_LINE_LIST => {
+            // Points come in independent (start, end) pairs — not a connected
+            // chain. A trailing unpaired point (malformed input) is dropped.
+            let pts: Vec<Vec3> = m
+                .points
+                .iter()
+                .map(|p| Vec3::new(p.x as f32, p.y as f32, p.z as f32))
+                .collect();
+            if pts.len() < 2 {
+                return None;
+            }
+            Some(ScenePrimitive::Polyline(Polyline {
+                points: pts,
+                color,
+                width: sx.max(0.005),
+                strip: false,
             }))
         }
         T_POINTS => {
@@ -506,7 +525,6 @@ fn build_primitive_locked(m: &Marker, topic: &str, state: &mut TopicState) -> Op
         other => {
             if state.warned_unsupported.insert(other) {
                 let name = match other {
-                    T_LINE_LIST => "LINE_LIST",
                     T_MESH_RESOURCE => "MESH_RESOURCE",
                     12 => "ARROW_STRIP",
                     _ => "UNKNOWN",

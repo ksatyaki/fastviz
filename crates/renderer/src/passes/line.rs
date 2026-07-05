@@ -169,7 +169,12 @@ impl LinePass {
                     }
                     let color = p.color.to_array();
                     let thickness = p.width;
-                    for pair in p.points.windows(2) {
+                    let pairs: Box<dyn Iterator<Item = &[Vec3]>> = if p.strip {
+                        Box::new(p.points.windows(2))
+                    } else {
+                        Box::new(p.points.chunks_exact(2))
+                    };
+                    for pair in pairs {
                         let a = transform_point(entity.transform, pair[0]);
                         let b = transform_point(entity.transform, pair[1]);
                         self.instances.push(LineInstance {

@@ -422,6 +422,7 @@ mod tests {
                 points: vec![Vec3::ZERO, Vec3::X],
                 color: Color::RED,
                 width: 1.0,
+                strip: true,
             }),
         ));
         g.entities.get_mut(&EntityId(7)).unwrap().dirty = false;
@@ -432,6 +433,7 @@ mod tests {
                 points: vec![Vec3::Y, Vec3::Z],
                 color: Color::GREEN,
                 width: 2.0,
+                strip: true,
             }),
         );
         let e = &g.entities[&EntityId(7)];
@@ -525,6 +527,7 @@ mod tests {
                 points: vec![Vec3::ZERO, Vec3::X],
                 color: Color::RED,
                 width: 1.0,
+                strip: true,
             }),
         ));
         g.set_scale_override(EntityId(51), Some(5.0));
@@ -534,6 +537,7 @@ mod tests {
                 points: vec![Vec3::Y, Vec3::Z],
                 color: Color::GREEN,
                 width: 2.0,
+                strip: true,
             }),
         ));
         match &g.entities[&EntityId(51)].primitive {

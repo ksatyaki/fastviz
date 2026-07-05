@@ -12,11 +12,18 @@ pub struct Point {
 }
 
 /// A polyline — ordered sequence of points connected by line segments.
+///
+/// `strip: true` connects consecutive points into a chain (`points.windows(2)`,
+/// as produced by e.g. `nav_msgs/Path` or a marker `LINE_STRIP`). `strip: false`
+/// treats `points` as independent segments taken two at a time (`points[0]`-
+/// `points[1]`, `points[2]`-`points[3]`, ...), matching marker `LINE_LIST`
+/// semantics; a trailing unpaired point is ignored.
 #[derive(Clone, Debug)]
 pub struct Polyline {
     pub points: Vec<Vec3>,
     pub color: Color,
     pub width: f32,
+    pub strip: bool,
 }
 
 /// An arrow (pose indicator).

@@ -579,6 +579,7 @@ mod tests {
                 points: Vec::new(),
                 color,
                 width,
+                strip: true,
             }),
         )
         .with_label(label)
